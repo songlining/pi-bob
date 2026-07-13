@@ -41,7 +41,8 @@ From `bobshell@1.0.6` installed at `/opt/homebrew/lib/node_modules/bobshell`:
 - Model-info route: `/inference/v1/model/info`
 - Default model alias: `premium`
 - Other visible aliases/constants: `pro`, `flash`, `flash-lite`, `bob-3-pro-preview`
-- Default context window for `premium`: ~1M tokens
+- Installed Bob Shell contains a broad ~1M context-window default, but the observed `premium` backend route maps to Claude Sonnet 4.5 with `Max Input Tokens=200000`.
+- Provider default context window for Pi: `200000`, so Pi compacts before Bob rejects oversized requests.
 - Default max output token constant: `8192`
 - Non-secret routing headers: `x-instance-id`, `x-team-id`
 - SSO browser login URL: `https://bob.ibm.com/login?callback_uri=...&state=...`
@@ -61,7 +62,7 @@ Defaults now target the discovered Bob Shell route:
 - `IBM_BOB_BASE_URL=https://api.us-east.bob.ibm.com/inference/v1`
 - `IBM_BOB_API=openai-completions`
 - `IBM_BOB_MODELS=premium`
-- `IBM_BOB_CONTEXT_WINDOW=1048576`
+- `IBM_BOB_CONTEXT_WINDOW=200000`
 - `IBM_BOB_MAX_TOKENS=8192`
 
 The extension reads only non-secret `ibm.instanceId` and `ibm.teamId` from `~/.bob/settings.json` unless `IBM_BOB_READ_BOBSHELL_SETTINGS=false`.
@@ -83,6 +84,7 @@ Secret configuration remains external:
 - Direct minimal chat completion returned `direct-bob-ok`.
 - Direct tool payload test showed Bob rejects `tools[].function.strict`; provider default now sets `supportsStrictMode=false`.
 - Pi end-to-end with fresh SSO token succeeded: `pi-bob-ok`.
+- After a real context overflow from Bob (`Max Input Tokens=200000, Got=236458`), the provider default context window was lowered from `1048576` to `200000` so Pi's own compaction/overflow handling can engage before Bob rejects the request.
 
 ## Remaining work
 
