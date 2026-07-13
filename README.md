@@ -17,7 +17,8 @@ From the installed `bobshell@1.0.6` package and the local redacted Bob configura
 - Model-info route used by Bob Shell: `/inference/v1/model/info`
 - Default model alias used by Bob Shell: `premium`
 - Other visible aliases/constants in the installed client: `pro`, `flash`, `flash-lite`, `bob-3-pro-preview`
-- Context window for `premium` in the installed client: ~1M tokens
+- Installed Bob Shell contains a broad ~1M context-window default, but the observed `premium` backend route maps to Claude Sonnet 4.5 with `Max Input Tokens=200000`.
+- Default context window advertised to Pi: `200000`, so Pi compacts before Bob rejects oversized requests.
 - Default max output token constant in the installed client: `8192`
 
 Bob Shell sends non-secret instance/team routing headers. This extension reads only these non-secret fields from `~/.bob/settings.json` by default:
@@ -65,7 +66,7 @@ Defaults are already set to:
 IBM_BOB_BASE_URL="https://api.us-east.bob.ibm.com/inference/v1"
 IBM_BOB_API="openai-completions"
 IBM_BOB_MODELS="premium"
-IBM_BOB_CONTEXT_WINDOW="1048576"
+IBM_BOB_CONTEXT_WINDOW="200000"
 IBM_BOB_MAX_TOKENS="8192"
 ```
 
@@ -108,7 +109,7 @@ For SSO, do **not** copy a token out of Bob's local credential store unless IBM 
 
 | Variable | Default | Description |
 | --- | --- | --- |
-| `IBM_BOB_CONTEXT_WINDOW` | `1048576` | Context window Pi should assume. |
+| `IBM_BOB_CONTEXT_WINDOW` | `200000` | Context window Pi should assume. Keep this at or below Bob's backend max input tokens so Pi compacts before Bob rejects the request. |
 | `IBM_BOB_MAX_TOKENS` | `8192` | Max output tokens Pi should request/allow. |
 | `IBM_BOB_INPUT` | `text` | Comma-separated input types: `text` or `text,image`. |
 | `IBM_BOB_REASONING` | `false` | Mark all configured models as reasoning-capable. |
@@ -158,7 +159,7 @@ IBM_BOB_API_KEY=dummy pi -e . --list-models | grep ibm-bob
 Result:
 
 ```text
-ibm-bob         premium                 1.0M     8.2K     no        no
+ibm-bob         premium                 200K     8.2K     no        no
 ```
 
 A dummy-token Pi request reaches the Bob endpoint and fails with the expected auth error:

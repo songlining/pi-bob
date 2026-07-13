@@ -53,6 +53,8 @@ const DEFAULT_BOB_ORIGIN = "https://api.us-east.bob.ibm.com";
 const DEFAULT_BASE_URL = `${DEFAULT_BOB_ORIGIN}/inference/v1`;
 const DEFAULT_WEB_LOGIN_URL = "https://bob.ibm.com/login";
 const DEFAULT_MODELS = ["premium"];
+const DEFAULT_CONTEXT_WINDOW = 200_000;
+const DEFAULT_MAX_TOKENS = 8192;
 const SUPPORTED_APIS = new Set<CompatibleApi>(["openai-completions", "openai-responses", "anthropic-messages"]);
 
 function env(name: string): string | undefined {
@@ -252,8 +254,8 @@ function buildModels(api: CompatibleApi): BobModelConfig[] {
 	const reasoningModels = parseReasoningModels();
 	const allReasoning = envBool("IBM_BOB_REASONING", false);
 	const input = parseInputTypes();
-	const contextWindow = envInt("IBM_BOB_CONTEXT_WINDOW", 1_048_576);
-	const maxTokens = envInt("IBM_BOB_MAX_TOKENS", 8192);
+	const contextWindow = envInt("IBM_BOB_CONTEXT_WINDOW", DEFAULT_CONTEXT_WINDOW);
+	const maxTokens = envInt("IBM_BOB_MAX_TOKENS", DEFAULT_MAX_TOKENS);
 	const compat = buildOpenAiCompat(api) ?? buildAnthropicCompat(api);
 
 	return ids.map((id) => ({
