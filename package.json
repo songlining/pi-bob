@@ -1,0 +1,27 @@
+{
+  "name": "pi-bob",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Pi provider extension for IBM Bob / IBM-approved compatible model endpoints.",
+  "keywords": [
+    "pi-package",
+    "pi-coding-agent",
+    "ibm",
+    "bob",
+    "llm-provider"
+  ],
+  "pi": {
+    "extensions": [
+      "./extensions/bob.ts"
+    ]
+  },
+  "scripts": {
+    "check": "pi -e . --list-models >/dev/null",
+    "clean": "echo 'nothing to clean'",
+    "build": "echo 'nothing to build'"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  }
+}
