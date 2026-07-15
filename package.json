@@ -1,7 +1,7 @@
 {
   "name": "pi-bob",
   "version": "0.1.0",
-  "private": true,
+
   "type": "module",
   "description": "Pi provider extension for IBM Bob / IBM-approved compatible model endpoints.",
   "keywords": [
@@ -16,12 +16,33 @@
       "./extensions/bob.ts"
     ]
   },
+  "files": [
+    "extensions/bob.ts",
+    "README.md",
+    "LICENSE"
+  ],
+  "author": "Larry Song",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/songlining/pi-bob.git"
+  },
+  "bugs": {
+    "url": "https://github.com/songlining/pi-bob/issues"
+  },
+  "homepage": "https://github.com/songlining/pi-bob#readme",
   "scripts": {
     "check": "pi -e . --list-models >/dev/null",
+    "test": "bun test",
     "clean": "echo 'nothing to clean'",
     "build": "echo 'nothing to build'"
   },
   "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
     "@earendil-works/pi-coding-agent": "*"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-ai": "0.80.7",
+    "@earendil-works/pi-coding-agent": "0.80.7"
   }
 }
