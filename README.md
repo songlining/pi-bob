@@ -2,7 +2,7 @@
 
 Pi provider package for IBM Bob / IBM-approved enterprise model endpoints.
 
-This first pass implements **Option 1** from `PLAN.md`: register Bob as a Pi provider using Pi's built-in compatible provider APIs. It does not scrape Bob, extract browser/session credentials, or bypass IBM-approved access paths.
+The package registers Bob through Pi's built-in compatible provider APIs and discovers the currently exposed model catalog from Bob's authenticated `/inference/v1/model/info` endpoint. It does not scrape Bob, extract browser/session credentials, or bypass IBM-approved access paths.
 
 ## Discovered local Bob Shell settings
 
@@ -36,7 +36,18 @@ Set `IBM_BOB_API` to one of Pi's compatible API adapters:
 - `openai-responses` — OpenAI Responses-compatible routes.
 - `anthropic-messages` — Anthropic Messages-compatible routes.
 
-The extension registers provider id `ibm-bob`.
+The extension registers provider id `ibm-bob`. It uses an isolated `ibm-bob-compatible` Pi API adapter internally, then delegates serialization and streaming to the selected built-in adapter. This prevents Bob-specific authentication rules from affecting other providers.
+
+## Dynamic model discovery
+
+Model discovery is enabled by default:
+
+- With `IBM_BOB_API_KEY` or `IBM_BOB_KEY`, the extension fetches `/inference/v1/model/info` during Pi's async extension startup. This makes current models available to `--list-models` and `/model` immediately.
+- With `/login ibm-bob`, the extension fetches the catalog after login and on each token refresh. A sanitized, non-secret copy is cached with Pi's OAuth credentials so the models can be restored on later startups.
+- Entries returned by the authenticated catalog are registered when `model_info.exposed` is omitted or `true`. Routes explicitly marked `exposed: false` are ignored.
+- HTTP failures, timeouts, malformed responses, empty catalogs, and catalogs with no visible models retain the previous SSO catalog or fall back to `IBM_BOB_MODELS`. Bob still enforces route access during inference.
+
+Discovered context limits, output limits, vision support, reasoning support, backend identifiers, and token prices are mapped into Pi model definitions. Bob reports prices per token; Pi displays prices per million tokens, so the extension performs that conversion.
 
 ## Quick start for the discovered Bob endpoint
 
@@ -51,30 +62,28 @@ pi -e /Users/larry.song/work/hashicorp/pi-bob
 
 Pi stores the resulting Bob SSO access/refresh tokens in Pi's normal auth store (`~/.pi/agent/auth.json`). This extension obtains those tokens only through Bob's browser SSO endpoints; it does not read Bob Shell's stored SSO secrets.
 
-For non-interactive/API-key use, if you have an approved Bob bearer token/API token available outside Bob Shell, run:
+For non-interactive use with an approved Bob API key, run:
 
 ```bash
-export IBM_BOB_API_KEY="..." # do not commit this
+export IBM_BOB_API_KEY="..." # IBM_BOB_KEY is also accepted; do not commit either
 
 pi -e /Users/larry.song/work/hashicorp/pi-bob --list-models
 pi -e /Users/larry.song/work/hashicorp/pi-bob --model ibm-bob/premium
 ```
+
+API keys use Bob's `Authorization: Apikey ...` scheme by default. If your approved credential is instead a bearer token, set `IBM_BOB_AUTH_SCHEME=Bearer`. Pi resolves credentials in this order: runtime `--api-key`, a stored credential (including SSO), then the provider's environment-key fallback. The model catalog follows stored SSO metadata when SSO remains configured. Run `/logout ibm-bob` before switching from SSO to either `IBM_BOB_API_KEY` or runtime `--api-key`; runtime-only keys cannot drive startup discovery.
 
 Defaults are already set to:
 
 ```bash
 IBM_BOB_BASE_URL="https://api.us-east.bob.ibm.com/inference/v1"
 IBM_BOB_API="openai-completions"
-IBM_BOB_MODELS="premium"
-IBM_BOB_CONTEXT_WINDOW="200000"
-IBM_BOB_MAX_TOKENS="8192"
+IBM_BOB_DISCOVER_MODELS="true"
+IBM_BOB_MODELS="premium"                  # fallback catalog
+IBM_BOB_MODEL_DISCOVERY_TIMEOUT_MS="5000"
 ```
 
-For IBM Bob API keys that require `Authorization: Apikey ...` rather than `Authorization: Bearer ...`:
-
-```bash
-export IBM_BOB_AUTH_SCHEME="Apikey"
-```
+Discovered metadata is used unless a corresponding metadata override is set. Without a discovered catalog, fallback models use a 200,000-token context window and 8,192-token output limit.
 
 For SSO, do **not** copy a token out of Bob's local credential store unless IBM policy explicitly permits it. Use `/login ibm-bob` instead.
 
@@ -84,10 +93,14 @@ For SSO, do **not** copy a token out of Bob's local credential store unless IBM 
 
 | Variable | Default | Description |
 | --- | --- | --- |
-| `IBM_BOB_BASE_URL` | `https://api.us-east.bob.ibm.com/inference/v1` | Approved Bob/IBM endpoint base URL. |
-| `IBM_BOB_MODELS` | `premium` | Comma-separated model IDs exposed by the endpoint. |
+| `IBM_BOB_BASE_URL` | `https://api.us-east.bob.ibm.com/inference/v1` | Approved Bob/IBM endpoint base URL. For `anthropic-messages`, a trailing `/inference/v1` is normalized so the adapter sends requests to `/inference/v1/messages` rather than `/inference/v1/v1/messages`. |
+| `IBM_BOB_MODELS` | `premium` | Comma-separated fallback model IDs used when discovery is unavailable. |
 | `IBM_BOB_API_KEY` | unset | Approved API key/token. Keep it out of repo files. |
+| `IBM_BOB_KEY` | unset | Alias for `IBM_BOB_API_KEY`, matching Bob/OpenCode configuration. |
 | `IBM_BOB_API` | `openai-completions` | One of `openai-completions`, `openai-responses`, `anthropic-messages`. |
+| `IBM_BOB_DISCOVER_MODELS` | `true` | Discover visible models from `/model/info`; entries explicitly marked `exposed: false` are excluded. |
+| `IBM_BOB_MODEL_DISCOVERY_TIMEOUT_MS` | `5000` | Startup/login discovery timeout in milliseconds. |
+| `IBM_BOB_TOKEN_REQUEST_TIMEOUT_MS` | `10000` | SSO token exchange and refresh timeout in milliseconds. |
 
 ### Bob routing headers
 
@@ -102,20 +115,20 @@ For SSO, do **not** copy a token out of Bob's local credential store unless IBM 
 
 | Variable | Default | Description |
 | --- | --- | --- |
-| `IBM_BOB_AUTH_SCHEME` | unset/Bearer via Pi's OpenAI adapter | Set to `Apikey` when the Bob token must be sent as `Authorization: Apikey $IBM_BOB_API_KEY`. Do not set this for `/login ibm-bob` SSO. |
+| `IBM_BOB_AUTH_SCHEME` | `Apikey` for environment API keys | Override with `Bearer` when the environment credential is a bearer token. SSO always uses Bearer automatically. |
 | `IBM_BOB_HEADERS_JSON` | unset | JSON object of extra headers. Values may use Pi env interpolation such as `"$IBM_BOB_API_KEY"`. |
 
 ### Model metadata
 
 | Variable | Default | Description |
 | --- | --- | --- |
-| `IBM_BOB_CONTEXT_WINDOW` | `200000` | Context window Pi should assume. Keep this at or below Bob's backend max input tokens so Pi compacts before Bob rejects the request. |
-| `IBM_BOB_MAX_TOKENS` | `8192` | Max output tokens Pi should request/allow. |
-| `IBM_BOB_INPUT` | `text` | Comma-separated input types: `text` or `text,image`. |
-| `IBM_BOB_REASONING` | `false` | Mark all configured models as reasoning-capable. |
-| `IBM_BOB_REASONING_MODELS` | empty | Comma-separated subset of model IDs that support reasoning. |
+| `IBM_BOB_CONTEXT_WINDOW` | discovered; fallback `200000` | Override the context window for every Bob model. Keep it at or below the backend limit so Pi compacts before Bob rejects the request. |
+| `IBM_BOB_MAX_TOKENS` | discovered; fallback `8192` | Override maximum output tokens for every Bob model. |
+| `IBM_BOB_INPUT` | discovered; fallback `text` | Override input types with `text` or `text,image`. |
+| `IBM_BOB_REASONING` | discovered; fallback `false` | Explicitly enable or disable reasoning for all models. |
+| `IBM_BOB_REASONING_MODELS` | empty | Comma-separated model IDs to mark as reasoning-capable. |
 
-Pricing is set to zero until IBM-specific metering details are known.
+Discovered pricing comes from Bob's model-info response and is converted to Pi's per-million-token units. Fallback models retain zero pricing.
 
 ### OpenAI compatibility toggles
 
@@ -150,16 +163,17 @@ Result: HTTP `401` with `Authentication required`, confirming the discovered rou
 
 The Bob SSO endpoint flow was smoke-tested independently: browser SSO callback succeeded, token exchange succeeded, and `GET /inference/v1/model/info` returned HTTP `200` using the fresh SSO token.
 
-The Pi provider registers with default settings when an env token is present:
+The Pi provider registers with fallback settings when no authenticated catalog is available:
 
 ```bash
-IBM_BOB_API_KEY=dummy pi -e . --list-models | grep ibm-bob
+pi -e . --list-models | grep ibm-bob
 ```
 
-Result:
+Automated tests cover LiteLLM response validation, hidden-model filtering, per-million cost conversion, API-key discovery, `IBM_BOB_KEY` compatibility, fallback behavior, SSO refresh discovery, routing headers, cached catalog replacement, and final authentication headers/routes through all three advertised adapters:
 
-```text
-ibm-bob         premium                 200K     8.2K     no        no
+```bash
+bun test
+npm run check
 ```
 
 A dummy-token Pi request reaches the Bob endpoint and fails with the expected auth error:
@@ -205,8 +219,7 @@ pi remove /Users/larry.song/work/hashicorp/pi-bob
 
 ## Next steps
 
-Option 1 is wired to the discovered Bob OpenAI-compatible route and `/login ibm-bob` is implemented. Next useful improvements:
+The compatible provider, `/login ibm-bob`, and dynamic model discovery are implemented. Next useful improvements:
 
 1. Add a `/bob-status` command that checks auth, model-info, selected instance, and selected team without printing secrets.
-2. Add optional dynamic model discovery from `/inference/v1/model/info` after login.
-3. Add tests around Bob's SSO callback and token refresh helpers.
+2. Run periodic compatibility smoke tests against representative Claude, GPT, and Gemini routes exposed by Bob.
