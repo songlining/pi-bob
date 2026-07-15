@@ -1,8 +1,17 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import type { OAuthCredentials, OAuthLoginCallbacks } from "@earendil-works/pi-ai";
+import type {
+	Api,
+	AssistantMessageEventStream,
+	Context,
+	Model,
+	OAuthCredentials,
+	OAuthLoginCallbacks,
+	SimpleStreamOptions,
+} from "@earendil-works/pi-ai";
+import { anthropicMessagesApi, openAICompletionsApi, openAIResponsesApi } from "@earendil-works/pi-ai/compat";
 import { randomBytes } from "node:crypto";
 import { readFileSync } from "node:fs";
-import { createServer, type Server } from "node:http";
+import { createServer } from "node:http";
 import { createServer as createNetServer } from "node:net";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -27,6 +36,20 @@ interface BobModelConfig {
 	compat?: Record<string, unknown>;
 }
 
+export interface BobDiscoveredModel {
+	id: string;
+	backend: string;
+	reasoning: boolean;
+	supportsVision: boolean;
+	contextWindow?: number;
+	maxTokens?: number;
+	cost: BobModelConfig["cost"];
+}
+
+interface BobOAuthCredentials extends OAuthCredentials {
+	bobModelCatalog?: BobDiscoveredModel[];
+}
+
 interface BobShellSettings {
 	ibm?: {
 		instanceId?: string;
@@ -42,19 +65,26 @@ interface BobTokenResponse {
 }
 
 interface CallbackServer {
-	port: number;
 	callbackUri: string;
 	code: Promise<string>;
 	close(): void;
 }
 
 const PROVIDER_ID = "ibm-bob";
+const BOB_API = "ibm-bob-compatible" as Api;
 const DEFAULT_BOB_ORIGIN = "https://api.us-east.bob.ibm.com";
 const DEFAULT_BASE_URL = `${DEFAULT_BOB_ORIGIN}/inference/v1`;
 const DEFAULT_WEB_LOGIN_URL = "https://bob.ibm.com/login";
 const DEFAULT_MODELS = ["premium"];
 const DEFAULT_CONTEXT_WINDOW = 200_000;
 const DEFAULT_MAX_TOKENS = 8192;
+const DEFAULT_MODEL_DISCOVERY_TIMEOUT_MS = 5000;
+const DEFAULT_TOKEN_REQUEST_TIMEOUT_MS = 10_000;
+const MAX_RESPONSE_BYTES = 1_048_576;
+const MAX_CATALOG_ENTRIES = 500;
+const MAX_CATALOG_LABEL_LENGTH = 512;
+const CATALOG_CONTROL_CHARACTER = /[\u0000-\u001f\u007f-\u009f]/;
+const CATALOG_CONTROL_CHARACTERS = /[\u0000-\u001f\u007f-\u009f]/g;
 const SUPPORTED_APIS = new Set<CompatibleApi>(["openai-completions", "openai-responses", "anthropic-messages"]);
 
 function env(name: string): string | undefined {
@@ -63,10 +93,14 @@ function env(name: string): string | undefined {
 }
 
 function envInt(name: string, fallback: number): number {
+	return envOptionalInt(name) ?? fallback;
+}
+
+function envOptionalInt(name: string): number | undefined {
 	const value = env(name);
-	if (!value) return fallback;
+	if (!value) return undefined;
 	const parsed = Number.parseInt(value, 10);
-	return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+	return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined;
 }
 
 function envBool(name: string, fallback: boolean): boolean {
@@ -75,6 +109,14 @@ function envBool(name: string, fallback: boolean): boolean {
 	if (["1", "true", "yes", "y", "on"].includes(value.toLowerCase())) return true;
 	if (["0", "false", "no", "n", "off"].includes(value.toLowerCase())) return false;
 	return fallback;
+}
+
+function envOptionalBool(name: string): boolean | undefined {
+	const value = env(name);
+	if (!value) return undefined;
+	if (["1", "true", "yes", "y", "on"].includes(value.toLowerCase())) return true;
+	if (["0", "false", "no", "n", "off"].includes(value.toLowerCase())) return false;
+	return undefined;
 }
 
 function envCsv(name: string, fallback: string[] = []): string[] {
@@ -108,6 +150,26 @@ function readBobShellSettings(): BobShellSettings | undefined {
 
 function providerBaseUrl(): string {
 	return env("IBM_BOB_BASE_URL") ?? DEFAULT_BASE_URL;
+}
+
+function providerRequestBaseUrl(api: CompatibleApi): string {
+	const baseUrl = providerBaseUrl().replace(/\/+$/, "");
+	return api === "anthropic-messages" ? baseUrl.replace(/\/inference\/v1$/, "/inference") : baseUrl;
+}
+
+function configuredApiKey(): { envName: "IBM_BOB_API_KEY" | "IBM_BOB_KEY"; value: string } | undefined {
+	const primary = env("IBM_BOB_API_KEY");
+	if (primary) return { envName: "IBM_BOB_API_KEY", value: primary };
+	const alias = env("IBM_BOB_KEY");
+	return alias ? { envName: "IBM_BOB_KEY", value: alias } : undefined;
+}
+
+function providerApiKeyReference(): string {
+	return `$${configuredApiKey()?.envName ?? "IBM_BOB_API_KEY"}`;
+}
+
+function apiKeyAuthScheme(): string {
+	return env("IBM_BOB_AUTH_SCHEME") ?? "Apikey";
 }
 
 function bobOrigin(): string {
@@ -185,11 +247,6 @@ function buildHeaders(settings?: BobShellSettings): Record<string, string> | und
 	if (instanceId) headers["x-instance-id"] = instanceId;
 	if (teamId) headers["x-team-id"] = teamId;
 
-	const authScheme = env("IBM_BOB_AUTH_SCHEME");
-	if (authScheme && authScheme.toLowerCase() !== "bearer") {
-		headers.Authorization = `${authScheme} $IBM_BOB_API_KEY`;
-	}
-
 	const jsonHeaders = parseJsonHeaders();
 	if (jsonHeaders) Object.assign(headers, jsonHeaders);
 
@@ -249,19 +306,143 @@ function buildAnthropicCompat(api: CompatibleApi): Record<string, unknown> | und
 	};
 }
 
-function buildModels(api: CompatibleApi): BobModelConfig[] {
-	const ids = envCsv("IBM_BOB_MODELS", DEFAULT_MODELS);
+function isRecord(value: unknown): value is Record<string, unknown> {
+	return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function positiveNumber(value: unknown): number | undefined {
+	return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : undefined;
+}
+
+function perMillionCost(value: unknown): number {
+	if (typeof value !== "number" || !Number.isFinite(value) || value < 0) return 0;
+	const scaled = value * 1_000_000;
+	return Number.isFinite(scaled) ? scaled : 0;
+}
+
+function safeCatalogLabel(value: unknown): string {
+	if (typeof value !== "string") return "";
+	const label = value.trim();
+	return label && label.length <= MAX_CATALOG_LABEL_LENGTH && !CATALOG_CONTROL_CHARACTER.test(label) ? label : "";
+}
+
+export function parseBobModelCatalog(payload: unknown): BobDiscoveredModel[] {
+	if (!isRecord(payload) || !Array.isArray(payload.data)) {
+		throw new Error("IBM Bob model-info response did not contain a data array.");
+	}
+	if (payload.data.length > MAX_CATALOG_ENTRIES) {
+		throw new Error(`IBM Bob model-info response exceeded ${MAX_CATALOG_ENTRIES} entries.`);
+	}
+
+	const models: BobDiscoveredModel[] = [];
+	const seen = new Set<string>();
+	let structurallyValidEntries = 0;
+	for (const entry of payload.data) {
+		if (!isRecord(entry) || !isRecord(entry.model_info) || !isRecord(entry.litellm_params)) continue;
+		const id = safeCatalogLabel(entry.model_name);
+		const backend = safeCatalogLabel(entry.litellm_params.model);
+		if (!id || !backend) continue;
+		const exposed = entry.model_info.exposed;
+		if (exposed !== undefined && typeof exposed !== "boolean") continue;
+		structurallyValidEntries++;
+
+		const visible = exposed === undefined || exposed === true;
+		if (!visible || seen.has(id)) continue;
+
+		seen.add(id);
+		models.push({
+			id,
+			backend,
+			reasoning:
+				entry.model_info.supports_reasoning === true ||
+				entry.model_info.supports_reasoning_effort === true ||
+				entry.model_info.supports_thinking === true,
+			supportsVision: entry.model_info.supports_vision === true,
+			contextWindow: positiveNumber(entry.model_info.max_input_tokens),
+			maxTokens: positiveNumber(entry.model_info.max_tokens),
+			cost: {
+				input: perMillionCost(entry.model_info.input_cost_per_token),
+				output: perMillionCost(entry.model_info.output_cost_per_token),
+				cacheRead: perMillionCost(entry.model_info.cache_read_input_token_cost),
+				cacheWrite: perMillionCost(entry.model_info.cache_creation_input_token_cost),
+			},
+		});
+	}
+
+	if (structurallyValidEntries === 0) {
+		throw new Error("IBM Bob model-info response contained no structurally valid model entries.");
+	}
+	if (models.length === 0) {
+		throw new Error("IBM Bob model-info response contained no visible models.");
+	}
+	return models;
+}
+
+function sanitizeCachedCatalog(value: unknown): BobDiscoveredModel[] | undefined {
+	if (!Array.isArray(value)) return undefined;
+	const models: BobDiscoveredModel[] = [];
+	const seen = new Set<string>();
+	for (const entry of value) {
+		if (!isRecord(entry) || !isRecord(entry.cost)) continue;
+		const id = safeCatalogLabel(entry.id);
+		const backend = safeCatalogLabel(entry.backend);
+		if (!id || !backend || seen.has(id)) continue;
+		seen.add(id);
+		models.push({
+			id,
+			backend,
+			reasoning: entry.reasoning === true,
+			supportsVision: entry.supportsVision === true,
+			contextWindow: positiveNumber(entry.contextWindow),
+			maxTokens: positiveNumber(entry.maxTokens),
+			cost: {
+				input: positiveNumber(entry.cost.input) ?? 0,
+				output: positiveNumber(entry.cost.output) ?? 0,
+				cacheRead: positiveNumber(entry.cost.cacheRead) ?? 0,
+				cacheWrite: positiveNumber(entry.cost.cacheWrite) ?? 0,
+			},
+		});
+	}
+	return models.length > 0 ? models : undefined;
+}
+
+function cachedCatalog(credentials: OAuthCredentials | undefined): BobDiscoveredModel[] | undefined {
+	return sanitizeCachedCatalog((credentials as BobOAuthCredentials | undefined)?.bobModelCatalog);
+}
+
+export function buildModels(api: CompatibleApi, discovered?: BobDiscoveredModel[]): BobModelConfig[] {
 	const reasoningModels = parseReasoningModels();
-	const allReasoning = envBool("IBM_BOB_REASONING", false);
-	const input = parseInputTypes();
-	const contextWindow = envInt("IBM_BOB_CONTEXT_WINDOW", DEFAULT_CONTEXT_WINDOW);
-	const maxTokens = envInt("IBM_BOB_MAX_TOKENS", DEFAULT_MAX_TOKENS);
+	const reasoningOverride = envOptionalBool("IBM_BOB_REASONING");
+	const inputOverride = env("IBM_BOB_INPUT") ? parseInputTypes() : undefined;
+	const contextOverride = envOptionalInt("IBM_BOB_CONTEXT_WINDOW");
+	const maxTokensOverride = envOptionalInt("IBM_BOB_MAX_TOKENS");
 	const compat = buildOpenAiCompat(api) ?? buildAnthropicCompat(api);
 
+	if (discovered && discovered.length > 0) {
+		return discovered.map((model) => ({
+			id: model.id,
+			name: model.backend === model.id ? modelName(model.id) : `${modelName(model.id)} — ${model.backend}`,
+			reasoning:
+				reasoningOverride === true ||
+				reasoningModels.has(model.id) ||
+				(reasoningOverride === undefined && model.reasoning),
+			input: inputOverride ?? (model.supportsVision ? ["text", "image"] : ["text"]),
+			contextWindow: contextOverride ?? model.contextWindow ?? DEFAULT_CONTEXT_WINDOW,
+			maxTokens: maxTokensOverride ?? model.maxTokens ?? DEFAULT_MAX_TOKENS,
+			cost: model.cost,
+			...(compat ? { compat } : {}),
+		}));
+	}
+
+	const configuredIds = envCsv("IBM_BOB_MODELS", DEFAULT_MODELS);
+	const ids = configuredIds.length > 0 ? configuredIds : DEFAULT_MODELS;
+	const input = inputOverride ?? parseInputTypes();
+	const contextWindow = contextOverride ?? DEFAULT_CONTEXT_WINDOW;
+	const maxTokens = maxTokensOverride ?? DEFAULT_MAX_TOKENS;
 	return ids.map((id) => ({
 		id,
 		name: modelName(id),
-		reasoning: allReasoning || reasoningModels.has(id),
+		reasoning: reasoningOverride === true || reasoningModels.has(id),
 		input,
 		contextWindow,
 		maxTokens,
@@ -270,16 +451,184 @@ function buildModels(api: CompatibleApi): BobModelConfig[] {
 	}));
 }
 
-function jwtExpiry(accessToken: string): number | undefined {
+async function readBoundedResponseBody(response: Response): Promise<string> {
+	const declaredLength = Number(response.headers.get("content-length"));
+	if (Number.isFinite(declaredLength) && declaredLength > MAX_RESPONSE_BYTES) {
+		throw new Error(`IBM Bob response exceeded ${MAX_RESPONSE_BYTES} bytes.`);
+	}
+	if (!response.body) return "";
+
+	const reader = response.body.getReader();
+	const decoder = new TextDecoder();
+	let bytesRead = 0;
+	let body = "";
 	try {
-		const [, payload] = accessToken.split(".");
-		if (!payload) return undefined;
-		const json = Buffer.from(payload.replace(/-/g, "+").replace(/_/g, "/"), "base64").toString("utf8");
-		const parsed = JSON.parse(json) as { exp?: unknown };
-		if (typeof parsed.exp !== "number") return undefined;
-		return parsed.exp * 1000 - 5 * 60 * 1000;
+		while (true) {
+			const { done, value } = await reader.read();
+			if (done) break;
+			bytesRead += value.byteLength;
+			if (bytesRead > MAX_RESPONSE_BYTES) {
+				await reader.cancel();
+				throw new Error(`IBM Bob response exceeded ${MAX_RESPONSE_BYTES} bytes.`);
+			}
+			body += decoder.decode(value, { stream: true });
+		}
+		return body + decoder.decode();
+	} finally {
+		reader.releaseLock();
+	}
+}
+
+async function readJsonResponse(response: Response): Promise<unknown> {
+	const body = await readBoundedResponseBody(response);
+	return JSON.parse(body);
+}
+
+function truncateHttpBody(body: string): string {
+	const trimmed = body.trim();
+	const truncated = trimmed.length > 512 ? `${trimmed.slice(0, 512)}…` : trimmed;
+	return truncated.replace(CATALOG_CONTROL_CHARACTERS, (character) =>
+		`\\u${character.charCodeAt(0).toString(16).padStart(4, "0")}`,
+	);
+}
+
+async function fetchBobModelCatalog(
+	accessToken: string,
+	authScheme: string,
+	settings?: BobShellSettings,
+): Promise<BobDiscoveredModel[]> {
+	const controller = new AbortController();
+	const timeoutMs = envInt("IBM_BOB_MODEL_DISCOVERY_TIMEOUT_MS", DEFAULT_MODEL_DISCOVERY_TIMEOUT_MS);
+	const timeout = setTimeout(() => controller.abort(), timeoutMs);
+	const headers: Record<string, string> = {
+		Accept: "application/json",
+		Authorization: `${authScheme} ${accessToken}`,
+		"User-Agent": env("IBM_BOB_USER_AGENT") ?? "pi-bob/0.1.0",
+	};
+	const instanceId = env("IBM_BOB_INSTANCE_ID") ?? settings?.ibm?.instanceId;
+	const teamId = env("IBM_BOB_TEAM_ID") ?? settings?.ibm?.teamId;
+	if (instanceId) headers["x-instance-id"] = instanceId;
+	if (teamId) headers["x-team-id"] = teamId;
+
+	try {
+		const response = await fetch(`${providerBaseUrl().replace(/\/+$/, "")}/model/info`, {
+			method: "GET",
+			headers,
+			signal: controller.signal,
+		});
+		if (!response.ok) {
+			throw new Error(
+				`IBM Bob model discovery failed: ${response.status} ${truncateHttpBody(await readBoundedResponseBody(response))}`.trim(),
+			);
+		}
+		return parseBobModelCatalog(await readJsonResponse(response));
+	} catch (error) {
+		if (controller.signal.aborted) {
+			throw new Error(`IBM Bob model discovery timed out after ${timeoutMs}ms.`);
+		}
+		throw error;
+	} finally {
+		clearTimeout(timeout);
+	}
+}
+
+async function attachBobModelCatalog(
+	credentials: OAuthCredentials,
+	previous?: OAuthCredentials,
+): Promise<BobOAuthCredentials> {
+	if (!envBool("IBM_BOB_DISCOVER_MODELS", true)) {
+		const previousCatalog = cachedCatalog(previous);
+		return previousCatalog ? { ...credentials, bobModelCatalog: previousCatalog } : credentials;
+	}
+
+	try {
+		const catalog = await fetchBobModelCatalog(credentials.access, "Bearer", readBobShellSettings());
+		return { ...credentials, bobModelCatalog: catalog };
+	} catch (error) {
+		const previousCatalog = cachedCatalog(previous);
+		console.warn(
+			`pi-bob: ${error instanceof Error ? error.message : String(error)} Using ${
+				previousCatalog ? "the previously cached catalog" : "configured fallback models"
+			}.`,
+		);
+		return previousCatalog ? { ...credentials, bobModelCatalog: previousCatalog } : credentials;
+	}
+}
+
+function jwtPayload(accessToken: string): Record<string, unknown> | undefined {
+	try {
+		const parts = accessToken.split(".");
+		if (parts.length !== 3 || !parts[1]) return undefined;
+		const json = Buffer.from(parts[1].replace(/-/g, "+").replace(/_/g, "/"), "base64").toString("utf8");
+		const parsed = JSON.parse(json) as unknown;
+		return isRecord(parsed) ? parsed : undefined;
 	} catch {
 		return undefined;
+	}
+}
+
+function jwtExpiry(accessToken: string): number | undefined {
+	const exp = jwtPayload(accessToken)?.exp;
+	return typeof exp === "number" ? exp * 1000 - 5 * 60 * 1000 : undefined;
+}
+
+export function applyBobAuthHeaders(
+	headers: Record<string, string | null | undefined>,
+	resolvedCredential?: string,
+): void {
+	let token = resolvedCredential;
+	if (!token) {
+		for (const [name, value] of Object.entries(headers)) {
+			if (typeof value !== "string") continue;
+			const lowerName = name.toLowerCase();
+			if (lowerName === "authorization") {
+				const match = value.match(/^\s*(?:Bearer|Apikey)\s+(.+)\s*$/iu);
+				if (match?.[1]) token = match[1];
+			} else if (lowerName === "x-api-key" && value.trim()) {
+				token ??= value.trim();
+			}
+		}
+	}
+	if (!token) return;
+
+	for (const name of Object.keys(headers)) {
+		const lowerName = name.toLowerCase();
+		if (lowerName === "authorization" || lowerName === "x-api-key") headers[name] = null;
+	}
+	const scheme = jwtPayload(token) ? "Bearer" : apiKeyAuthScheme();
+	headers.Authorization = `${scheme} ${token}`;
+}
+
+function streamBob(
+	adapter: CompatibleApi,
+	model: Model<Api>,
+	context: Context,
+	options?: SimpleStreamOptions,
+): AssistantMessageEventStream {
+	const mutableHeaders: Record<string, string | null | undefined> = { ...options?.headers };
+	applyBobAuthHeaders(mutableHeaders, options?.apiKey);
+	const headers = Object.fromEntries(
+		Object.entries(mutableHeaders).filter((entry): entry is [string, string] => typeof entry[1] === "string"),
+	);
+	const hasHeaderAuth = Object.keys(headers).some((name) => name.toLowerCase() === "authorization");
+	const forwardedOptions: SimpleStreamOptions = { ...options, headers };
+
+	switch (adapter) {
+		case "anthropic-messages":
+			return anthropicMessagesApi().streamSimple(model as Model<"anthropic-messages">, context, {
+				...forwardedOptions,
+				apiKey: hasHeaderAuth ? undefined : options?.apiKey,
+			});
+		case "openai-responses":
+			return openAIResponsesApi().streamSimple(model as Model<"openai-responses">, context, {
+				...forwardedOptions,
+				apiKey: hasHeaderAuth ? "pi-bob-header-auth" : options?.apiKey,
+			});
+		default:
+			return openAICompletionsApi().streamSimple(model as Model<"openai-completions">, context, {
+				...forwardedOptions,
+				apiKey: hasHeaderAuth ? "pi-bob-header-auth" : options?.apiKey,
+			});
 	}
 }
 
@@ -375,7 +724,6 @@ async function startCallbackServer(state: string): Promise<CallbackServer> {
 	});
 
 	return {
-		port,
 		callbackUri: `http://localhost:${port}/bob-callback`,
 		code,
 		close() {
@@ -385,17 +733,30 @@ async function startCallbackServer(state: string): Promise<CallbackServer> {
 }
 
 async function postToken(path: "/authn/v1/auth/token" | "/authn/v1/auth/refresh", body: unknown): Promise<BobTokenResponse> {
-	const response = await fetch(`${bobOrigin()}${path}`, {
-		method: "POST",
-		headers: { "Content-Type": "application/json", "User-Agent": env("IBM_BOB_USER_AGENT") ?? "pi-bob/0.1.0" },
-		body: JSON.stringify(body),
-	});
+	const controller = new AbortController();
+	const timeoutMs = envInt("IBM_BOB_TOKEN_REQUEST_TIMEOUT_MS", DEFAULT_TOKEN_REQUEST_TIMEOUT_MS);
+	const timeout = setTimeout(() => controller.abort(), timeoutMs);
+	try {
+		const response = await fetch(`${bobOrigin()}${path}`, {
+			method: "POST",
+			headers: { "Content-Type": "application/json", "User-Agent": env("IBM_BOB_USER_AGENT") ?? "pi-bob/0.1.0" },
+			body: JSON.stringify(body),
+			signal: controller.signal,
+		});
 
-	if (!response.ok) {
-		throw new Error(`IBM Bob SSO token request failed: ${response.status} ${await response.text()}`);
+		if (!response.ok) {
+			throw new Error(
+				`IBM Bob SSO token request failed: ${response.status} ${truncateHttpBody(await readBoundedResponseBody(response))}`,
+			);
+		}
+
+		return (await readJsonResponse(response)) as BobTokenResponse;
+	} catch (error) {
+		if (controller.signal.aborted) throw new Error(`IBM Bob SSO token request timed out after ${timeoutMs}ms.`);
+		throw error;
+	} finally {
+		clearTimeout(timeout);
 	}
-
-	return (await response.json()) as BobTokenResponse;
 }
 
 async function loginBob(callbacks: OAuthLoginCallbacks): Promise<OAuthCredentials> {
@@ -405,51 +766,83 @@ async function loginBob(callbacks: OAuthLoginCallbacks): Promise<OAuthCredential
 	loginUrl.searchParams.set("callback_uri", callbackServer.callbackUri);
 	loginUrl.searchParams.set("state", state);
 
+	let loginTimeout: ReturnType<typeof setTimeout> | undefined;
 	try {
 		callbacks.onAuth({ url: loginUrl.toString() });
-		callbacks.onDeviceCode?.({
-			userCode: "Browser SSO",
-			verificationUri: loginUrl.toString(),
-			expiresInSeconds: Math.floor(envInt("IBM_BOB_LOGIN_TIMEOUT_MS", 180_000) / 1000),
-		});
 
 		const timeoutMs = envInt("IBM_BOB_LOGIN_TIMEOUT_MS", 180_000);
 		const timeout = new Promise<never>((_resolve, reject) => {
-			setTimeout(() => reject(new Error("IBM Bob SSO timed out.")), timeoutMs);
+			loginTimeout = setTimeout(() => reject(new Error("IBM Bob SSO timed out.")), timeoutMs);
 		});
 
 		const code = await Promise.race([callbackServer.code, timeout]);
-		return credentialsFromTokenResponse(await postToken("/authn/v1/auth/token", { code }));
+		const credentials = credentialsFromTokenResponse(await postToken("/authn/v1/auth/token", { code }));
+		return attachBobModelCatalog(credentials);
 	} finally {
+		if (loginTimeout) clearTimeout(loginTimeout);
 		callbackServer.close();
 	}
 }
 
 async function refreshBobToken(credentials: OAuthCredentials): Promise<OAuthCredentials> {
 	if (!credentials.refresh) throw new Error("No IBM Bob refresh token is available. Run /login ibm-bob again.");
-	return credentialsFromTokenResponse(
+	const refreshed = credentialsFromTokenResponse(
 		await postToken("/authn/v1/auth/refresh", { refresh_token: credentials.refresh }),
 		credentials.refresh,
 	);
+	return attachBobModelCatalog(refreshed, credentials);
 }
 
-export default function (pi: ExtensionAPI) {
+function modifyModelsFromCachedCatalog(
+	models: Model<Api>[],
+	credentials: OAuthCredentials,
+	api: CompatibleApi,
+): Model<Api>[] {
+	if (!envBool("IBM_BOB_DISCOVER_MODELS", true)) return models;
+	const catalog = cachedCatalog(credentials);
+	const otherProviders = models.filter((model) => model.provider !== PROVIDER_ID);
+	const discovered = buildModels(api, catalog).map(
+		(model) =>
+			({
+				...model,
+				api: BOB_API,
+				provider: PROVIDER_ID,
+				baseUrl: providerRequestBaseUrl(api),
+			}) as Model<Api>,
+	);
+	return [...otherProviders, ...discovered];
+}
+
+export default async function (pi: ExtensionAPI) {
 	const api = parseApi();
 	const settings = readBobShellSettings();
 	const headers = buildHeaders(settings);
+	let catalog: BobDiscoveredModel[] | undefined;
+	const apiKey = configuredApiKey();
+	if (apiKey && envBool("IBM_BOB_DISCOVER_MODELS", true)) {
+		try {
+			catalog = await fetchBobModelCatalog(apiKey.value, apiKeyAuthScheme(), settings);
+		} catch (error) {
+			console.warn(
+				`pi-bob: ${error instanceof Error ? error.message : String(error)} Using configured fallback models.`,
+			);
+		}
+	}
 
 	pi.registerProvider(PROVIDER_ID, {
 		name: "IBM Bob",
-		baseUrl: providerBaseUrl(),
-		apiKey: "$IBM_BOB_API_KEY",
-		api,
+		baseUrl: providerRequestBaseUrl(api),
+		apiKey: providerApiKeyReference(),
+		api: BOB_API,
 		...(headers ? { headers } : {}),
-		models: buildModels(api),
+		models: buildModels(api, catalog),
+		streamSimple: (model, context, options) => streamBob(api, model, context, options),
 		oauth: {
 			name: "IBM Bob SSO",
 			login: loginBob,
 			refreshToken: refreshBobToken,
 			getApiKey: (credentials) => credentials.access,
+			modifyModels: (models, credentials) => modifyModelsFromCachedCatalog(models, credentials, api),
 		},
 	});
 }
