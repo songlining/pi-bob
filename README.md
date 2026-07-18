@@ -8,8 +8,8 @@ The package registers Bob through Pi's built-in compatible provider APIs and dis
 
 From the installed `bobshell@1.0.6` package and the local redacted Bob configuration:
 
-- Bob Shell CLI: `/opt/homebrew/bin/bob`
-- Bob Shell package: `/opt/homebrew/lib/node_modules/bobshell`
+- Bob Shell CLI: `bob`
+- Bob Shell package: `bobshell`
 - Installed auth method: `sso`
 - Default Bob API host: `https://api.us-east.bob.ibm.com`
 - OpenAI-compatible chat base URL: `https://api.us-east.bob.ibm.com/inference/v1`
@@ -54,7 +54,7 @@ Discovered context limits, output limits, vision support, reasoning support, bac
 Use Bob SSO through Pi:
 
 ```bash
-pi -e /Users/larry.song/work/hashicorp/pi-bob
+pi -e .
 # inside Pi:
 #   /login ibm-bob
 #   /model ibm-bob/premium
@@ -67,8 +67,8 @@ For non-interactive use with an approved Bob API key, run:
 ```bash
 export IBM_BOB_API_KEY="..." # IBM_BOB_KEY is also accepted; do not commit either
 
-pi -e /Users/larry.song/work/hashicorp/pi-bob --list-models
-pi -e /Users/larry.song/work/hashicorp/pi-bob --model ibm-bob/premium
+pi -e . --list-models
+pi -e . --model ibm-bob/premium
 ```
 
 API keys use Bob's `Authorization: Apikey ...` scheme by default. If your approved credential is instead a bearer token, set `IBM_BOB_AUTH_SCHEME=Bearer`. Pi resolves credentials in this order: runtime `--api-key`, a stored credential (including SSO), then the provider's environment-key fallback. The model catalog follows stored SSO metadata when SSO remains configured. Run `/logout ibm-bob` before switching from SSO to either `IBM_BOB_API_KEY` or runtime `--api-key`; runtime-only keys cannot drive startup discovery.
@@ -109,7 +109,7 @@ For SSO, do **not** copy a token out of Bob's local credential store unless IBM 
 | `IBM_BOB_READ_BOBSHELL_SETTINGS` | `true` | Read non-secret `instanceId`/`teamId` from `~/.bob/settings.json`. |
 | `IBM_BOB_INSTANCE_ID` | Bob setting | Override `x-instance-id`. |
 | `IBM_BOB_TEAM_ID` | Bob setting | Override `x-team-id`. |
-| `IBM_BOB_USER_AGENT` | `pi-bob/0.1.0` | User-Agent header sent to Bob endpoint. |
+| `IBM_BOB_USER_AGENT` | `pi-bob/0.2.0` | User-Agent header sent to Bob endpoint. |
 
 ### Auth headers
 
@@ -202,19 +202,19 @@ pi-bob-ok
 Temporary test load:
 
 ```bash
-pi -e /Users/larry.song/work/hashicorp/pi-bob
+pi -e .
 ```
 
 Install as a local Pi package:
 
 ```bash
-pi install /Users/larry.song/work/hashicorp/pi-bob
+pi install npm:pi-bob
 ```
 
 Remove later:
 
 ```bash
-pi remove /Users/larry.song/work/hashicorp/pi-bob
+pi remove npm:pi-bob
 ```
 
 ## Next steps

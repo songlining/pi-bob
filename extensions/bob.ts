@@ -239,7 +239,7 @@ function parseJsonHeaders(): Record<string, string> | undefined {
 
 function buildHeaders(settings?: BobShellSettings): Record<string, string> | undefined {
 	const headers: Record<string, string> = {
-		"User-Agent": env("IBM_BOB_USER_AGENT") ?? "pi-bob/0.1.0",
+		"User-Agent": env("IBM_BOB_USER_AGENT") ?? "pi-bob/0.2.0",
 	};
 
 	const instanceId = env("IBM_BOB_INSTANCE_ID") ?? settings?.ibm?.instanceId;
@@ -503,7 +503,7 @@ async function fetchBobModelCatalog(
 	const headers: Record<string, string> = {
 		Accept: "application/json",
 		Authorization: `${authScheme} ${accessToken}`,
-		"User-Agent": env("IBM_BOB_USER_AGENT") ?? "pi-bob/0.1.0",
+		"User-Agent": env("IBM_BOB_USER_AGENT") ?? "pi-bob/0.2.0",
 	};
 	const instanceId = env("IBM_BOB_INSTANCE_ID") ?? settings?.ibm?.instanceId;
 	const teamId = env("IBM_BOB_TEAM_ID") ?? settings?.ibm?.teamId;
@@ -739,7 +739,7 @@ async function postToken(path: "/authn/v1/auth/token" | "/authn/v1/auth/refresh"
 	try {
 		const response = await fetch(`${bobOrigin()}${path}`, {
 			method: "POST",
-			headers: { "Content-Type": "application/json", "User-Agent": env("IBM_BOB_USER_AGENT") ?? "pi-bob/0.1.0" },
+			headers: { "Content-Type": "application/json", "User-Agent": env("IBM_BOB_USER_AGENT") ?? "pi-bob/0.2.0" },
 			body: JSON.stringify(body),
 			signal: controller.signal,
 		});
