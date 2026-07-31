@@ -807,8 +807,10 @@ async function loginBob(callbacks: OAuthLoginCallbacks): Promise<OAuthCredential
 	loginUrl.searchParams.set("callback_uri", callbackServer.callbackUri);
 	loginUrl.searchParams.set("state", state);
 
+	const signal = callbacks.signal;
 	let loginTimeout: ReturnType<typeof setTimeout> | undefined;
 	let progressInterval: ReturnType<typeof setInterval> | undefined;
+	let onAbort: (() => void) | undefined;
 	try {
 		callbacks.onAuth({ url: loginUrl.toString() });
 		bobLog(`login: browser opened for SSO (+${elapsed()})`);
@@ -821,11 +823,29 @@ async function loginBob(callbacks: OAuthLoginCallbacks): Promise<OAuthCredential
 			}, timeoutMs);
 		});
 
+		const abort =
+			signal === undefined
+				? undefined
+				: new Promise<never>((_resolve, reject) => {
+						if (signal.aborted) {
+							bobLog("login: cancelled (abort signal already fired)");
+							reject(new Error("Login cancelled."));
+							return;
+						}
+						onAbort = () => {
+							bobLog(`login: cancelled via abort signal (+${elapsed()})`);
+							reject(new Error("Login cancelled."));
+						};
+						signal.addEventListener("abort", onAbort, { once: true });
+					});
+
 		progressInterval = setInterval(() => {
 			bobLog(`login: still waiting for SSO browser callback (+${elapsed()})`);
 		}, Math.min(15_000, Math.max(5_000, Math.floor(timeoutMs / 12))));
 
-		const code = await Promise.race([callbackServer.code, timeout]);
+		const races: Array<Promise<string | never>> = [callbackServer.code, timeout];
+		if (abort) races.push(abort);
+		const code = await Promise.race(races);
 		bobLog(`login: SSO callback received (+${elapsed()})`);
 
 		const credentials = credentialsFromTokenResponse(await postToken("/authn/v1/auth/token", { code }));
@@ -841,6 +861,7 @@ async function loginBob(callbacks: OAuthLoginCallbacks): Promise<OAuthCredential
 	} finally {
 		if (loginTimeout) clearTimeout(loginTimeout);
 		if (progressInterval) clearInterval(progressInterval);
+		if (onAbort && signal) signal.removeEventListener("abort", onAbort);
 		callbackServer.close();
 	}
 }
