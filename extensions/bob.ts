@@ -497,6 +497,7 @@ async function fetchBobModelCatalog(
 	authScheme: string,
 	settings?: BobShellSettings,
 ): Promise<BobDiscoveredModel[]> {
+	const startedAt = Date.now();
 	const controller = new AbortController();
 	const timeoutMs = envInt("IBM_BOB_MODEL_DISCOVERY_TIMEOUT_MS", DEFAULT_MODEL_DISCOVERY_TIMEOUT_MS);
 	const timeout = setTimeout(() => controller.abort(), timeoutMs);
@@ -505,10 +506,14 @@ async function fetchBobModelCatalog(
 		Authorization: `${authScheme} ${accessToken}`,
 		"User-Agent": env("IBM_BOB_USER_AGENT") ?? "pi-bob/0.2.0",
 	};
-	const instanceId = env("IBM_BOB_INSTANCE_ID") ?? settings?.ibm?.instanceId;
+	const instanceId =
+		env("IBM_BOB_INSTANCE_ID") ?? settings?.ibm?.instanceId ?? readInstanceFromJwt(accessToken);
 	const teamId = env("IBM_BOB_TEAM_ID") ?? settings?.ibm?.teamId;
 	if (instanceId) headers["x-instance-id"] = instanceId;
 	if (teamId) headers["x-team-id"] = teamId;
+	bobLog(
+		`model discovery → ${providerBaseUrl().replace(/\/+$/, "")}/model/info (instance=${instanceId ?? "none"}, timeout=${timeoutMs}ms)`,
+	);
 
 	try {
 		const response = await fetch(`${providerBaseUrl().replace(/\/+$/, "")}/model/info`, {
@@ -521,11 +526,16 @@ async function fetchBobModelCatalog(
 				`IBM Bob model discovery failed: ${response.status} ${truncateHttpBody(await readBoundedResponseBody(response))}`.trim(),
 			);
 		}
-		return parseBobModelCatalog(await readJsonResponse(response));
+		const catalog = parseBobModelCatalog(await readJsonResponse(response));
+		bobLog(`model discovery ok: ${catalog.length} models in ${Date.now() - startedAt}ms`);
+		return catalog;
 	} catch (error) {
 		if (controller.signal.aborted) {
 			throw new Error(`IBM Bob model discovery timed out after ${timeoutMs}ms.`);
 		}
+		bobLog(
+			`model discovery failed in ${Date.now() - startedAt}ms: ${error instanceof Error ? error.message : String(error)}`,
+		);
 		throw error;
 	} finally {
 		clearTimeout(timeout);
@@ -570,6 +580,21 @@ function jwtPayload(accessToken: string): Record<string, unknown> | undefined {
 function jwtExpiry(accessToken: string): number | undefined {
 	const exp = jwtPayload(accessToken)?.exp;
 	return typeof exp === "number" ? exp * 1000 - 5 * 60 * 1000 : undefined;
+}
+
+function readInstanceFromJwt(accessToken: string | undefined): string | undefined {
+	if (!accessToken) return undefined;
+	const instances = jwtPayload(accessToken)?.instances;
+	if (!Array.isArray(instances) || instances.length === 0) return undefined;
+	for (const entry of instances) {
+		if (isRecord(entry) && typeof entry.id === "string" && entry.id) return entry.id;
+	}
+	return undefined;
+}
+
+function bobLog(message: string): void {
+	if (!envBool("IBM_BOB_DEBUG", false)) return;
+	console.warn(`[pi-bob] ${new Date().toISOString()} ${message}`);
 }
 
 export function applyBobAuthHeaders(
@@ -666,6 +691,7 @@ async function startCallbackServer(state: string): Promise<CallbackServer> {
 
 	const code = new Promise<string>((resolve, reject) => {
 		server.on("request", (req, res) => {
+			bobLog(`login: callback request received: ${(req.url ?? "").split("?")[0] || "(no path)"}`);
 			if (!req.url?.startsWith("/bob-callback")) {
 				res.writeHead(404, { "Content-Type": "text/plain" });
 				res.end("Not Found");
@@ -679,6 +705,7 @@ async function startCallbackServer(state: string): Promise<CallbackServer> {
 				const error = url.searchParams.get("error");
 
 				if (returnedState !== state) {
+					bobLog(`login: callback state mismatch (expected ${state}, got ${returnedState})`);
 					res.writeHead(400, { "Content-Type": "text/plain" });
 					res.end("Invalid state parameter");
 					reject(new Error("Invalid state parameter from IBM Bob SSO callback."));
@@ -686,6 +713,7 @@ async function startCallbackServer(state: string): Promise<CallbackServer> {
 				}
 
 				if (error) {
+					bobLog(`login: callback auth error: ${error}`);
 					res.writeHead(400, { "Content-Type": "text/plain" });
 					res.end("Authentication failed");
 					reject(new Error(`IBM Bob SSO failed: ${error}`));
@@ -693,6 +721,7 @@ async function startCallbackServer(state: string): Promise<CallbackServer> {
 				}
 
 				if (!authCode) {
+					bobLog("login: callback missing authorization code");
 					res.writeHead(400, { "Content-Type": "text/plain" });
 					res.end("Missing authorization code");
 					reject(new Error("IBM Bob SSO callback did not include an authorization code."));
@@ -712,7 +741,10 @@ async function startCallbackServer(state: string): Promise<CallbackServer> {
 				reject(error);
 			}
 		});
-		server.on("error", reject);
+		server.on("error", (error) => {
+			bobLog(`login: callback server error: ${error instanceof Error ? error.message : String(error)}`);
+			reject(error);
+		});
 	});
 
 	await new Promise<void>((resolve, reject) => {
@@ -733,9 +765,11 @@ async function startCallbackServer(state: string): Promise<CallbackServer> {
 }
 
 async function postToken(path: "/authn/v1/auth/token" | "/authn/v1/auth/refresh", body: unknown): Promise<BobTokenResponse> {
+	const startedAt = Date.now();
 	const controller = new AbortController();
 	const timeoutMs = envInt("IBM_BOB_TOKEN_REQUEST_TIMEOUT_MS", DEFAULT_TOKEN_REQUEST_TIMEOUT_MS);
 	const timeout = setTimeout(() => controller.abort(), timeoutMs);
+	bobLog(`token request → ${bobOrigin()}${path} (timeout=${timeoutMs}ms)`);
 	try {
 		const response = await fetch(`${bobOrigin()}${path}`, {
 			method: "POST",
@@ -750,6 +784,7 @@ async function postToken(path: "/authn/v1/auth/token" | "/authn/v1/auth/refresh"
 			);
 		}
 
+		bobLog(`token request ok in ${Date.now() - startedAt}ms`);
 		return (await readJsonResponse(response)) as BobTokenResponse;
 	} catch (error) {
 		if (controller.signal.aborted) throw new Error(`IBM Bob SSO token request timed out after ${timeoutMs}ms.`);
@@ -760,26 +795,52 @@ async function postToken(path: "/authn/v1/auth/token" | "/authn/v1/auth/refresh"
 }
 
 async function loginBob(callbacks: OAuthLoginCallbacks): Promise<OAuthCredentials> {
+	const startedAt = Date.now();
+	const elapsed = () => `${((Date.now() - startedAt) / 1000).toFixed(1)}s`;
+	bobLog("login: starting IBM Bob SSO");
+
 	const state = randomBytes(16).toString("hex");
 	const callbackServer = await startCallbackServer(state);
+	bobLog(`login: callback server listening at ${callbackServer.callbackUri} (+${elapsed()})`);
+
 	const loginUrl = new URL(bobWebLoginUrl());
 	loginUrl.searchParams.set("callback_uri", callbackServer.callbackUri);
 	loginUrl.searchParams.set("state", state);
 
 	let loginTimeout: ReturnType<typeof setTimeout> | undefined;
+	let progressInterval: ReturnType<typeof setInterval> | undefined;
 	try {
 		callbacks.onAuth({ url: loginUrl.toString() });
+		bobLog(`login: browser opened for SSO (+${elapsed()})`);
 
 		const timeoutMs = envInt("IBM_BOB_LOGIN_TIMEOUT_MS", 180_000);
 		const timeout = new Promise<never>((_resolve, reject) => {
-			loginTimeout = setTimeout(() => reject(new Error("IBM Bob SSO timed out.")), timeoutMs);
+			loginTimeout = setTimeout(() => {
+				bobLog(`login: SSO timed out after ${timeoutMs}ms (+${elapsed()})`);
+				reject(new Error("IBM Bob SSO timed out."));
+			}, timeoutMs);
 		});
 
+		progressInterval = setInterval(() => {
+			bobLog(`login: still waiting for SSO browser callback (+${elapsed()})`);
+		}, Math.min(15_000, Math.max(5_000, Math.floor(timeoutMs / 12))));
+
 		const code = await Promise.race([callbackServer.code, timeout]);
+		bobLog(`login: SSO callback received (+${elapsed()})`);
+
 		const credentials = credentialsFromTokenResponse(await postToken("/authn/v1/auth/token", { code }));
-		return attachBobModelCatalog(credentials);
+		bobLog(`login: access token exchanged (+${elapsed()})`);
+
+		const withCatalog = await attachBobModelCatalog(credentials);
+		bobLog(`login: model catalog attached (+${elapsed()})`);
+
+		return withCatalog;
+	} catch (error) {
+		bobLog(`login: failed (+${elapsed()}): ${error instanceof Error ? error.message : String(error)}`);
+		throw error;
 	} finally {
 		if (loginTimeout) clearTimeout(loginTimeout);
+		if (progressInterval) clearInterval(progressInterval);
 		callbackServer.close();
 	}
 }
