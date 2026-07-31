@@ -829,12 +829,12 @@ async function loginBob(callbacks: OAuthLoginCallbacks): Promise<OAuthCredential
 				: new Promise<never>((_resolve, reject) => {
 						if (signal.aborted) {
 							bobLog("login: cancelled (abort signal already fired)");
-							reject(new Error("Login cancelled."));
+							reject(new Error("Login cancelled"));
 							return;
 						}
 						onAbort = () => {
 							bobLog(`login: cancelled via abort signal (+${elapsed()})`);
-							reject(new Error("Login cancelled."));
+							reject(new Error("Login cancelled"));
 						};
 						signal.addEventListener("abort", onAbort, { once: true });
 					});
@@ -872,6 +872,15 @@ async function refreshBobToken(credentials: OAuthCredentials): Promise<OAuthCred
 		await postToken("/authn/v1/auth/refresh", { refresh_token: credentials.refresh }),
 		credentials.refresh,
 	);
+	// Token refresh runs inside pi-ai's locked credentials.modify (auth.json lock).
+	// Avoid holding that global lock across a model-discovery network call when a
+	// catalog is already cached; rediscovery still happens on login and whenever
+	// no cached catalog exists.
+	const existingCatalog = cachedCatalog(credentials);
+	if (existingCatalog) {
+		bobLog(`refresh: reusing cached catalog (${existingCatalog.length} models); skipping rediscovery`);
+		return { ...refreshed, bobModelCatalog: existingCatalog };
+	}
 	return attachBobModelCatalog(refreshed, credentials);
 }
 
