@@ -43,7 +43,7 @@ The extension registers provider id `ibm-bob`. It uses an isolated `ibm-bob-comp
 Model discovery is enabled by default:
 
 - With `IBM_BOB_API_KEY` or `IBM_BOB_KEY`, the extension fetches `/inference/v1/model/info` during Pi's async extension startup. This makes current models available to `--list-models` and `/model` immediately.
-- With `/login ibm-bob`, the extension fetches the catalog after login and on each token refresh. A sanitized, non-secret copy is cached with Pi's OAuth credentials so the models can be restored on later startups.
+- With `/login ibm-bob`, the extension fetches the catalog after login, and on token refresh only when no catalog is already cached (reusing a cached catalog avoids holding Pi's global auth-store lock across a network call). A sanitized, non-secret copy is cached with Pi's OAuth credentials so the models can be restored on later startups.
 - Entries returned by the authenticated catalog are registered when `model_info.exposed` is omitted or `true`. Routes explicitly marked `exposed: false` are ignored.
 - HTTP failures, timeouts, malformed responses, empty catalogs, and catalogs with no visible models retain the previous SSO catalog or fall back to `IBM_BOB_MODELS`. Bob still enforces route access during inference.
 
@@ -195,6 +195,25 @@ Result:
 
 ```text
 pi-bob-ok
+```
+
+## Troubleshooting
+
+**`/login ibm-bob` freezes after the browser returns to Pi.** Pi refreshes
+model catalogs for built-in providers after every login by fetching
+`https://pi.dev/api/models/providers/<id>` (the remote-catalog provider). If
+pi.dev's API is unreachable or hangs from your network, that post-login fetch
+blocks with no timeout for roughly 5 minutes, and Ctrl-C cannot cancel it.
+Run Pi with `PI_OFFLINE=1` to skip Pi's network catalog refresh entirely; the
+login then returns to the prompt immediately after SSO, and ibm-bob's own
+model discovery still runs.
+
+**Debugging the login flow.** Run with `IBM_BOB_DEBUG=1` and stderr
+redirected to a file to see per-step timing for the SSO callback, token
+exchange, and model discovery:
+
+```bash
+IBM_BOB_DEBUG=1 pi 2>/tmp/pi-bob-debug.log
 ```
 
 ## Install options
