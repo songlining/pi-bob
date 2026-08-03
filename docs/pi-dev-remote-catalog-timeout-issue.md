@@ -2,7 +2,7 @@
 
 ## Summary
 
-After a successful `/login` (observed with `ibm-bob`, but provider-agnostic), the post-login model refresh calls the pi.dev remote-catalog API with **no timeout**. When pi.dev's `/api/models/providers/*` is unresponsive, the login hangs for undici's default ~300s, and Ctrl-C/Escape cannot cancel it (no abort signal is wired into the post-login refresh). `PI_OFFLINE=1` avoids the call entirely and the login returns instantly.
+After a successful `/login` — reproduced after logging into **multiple providers** (`ibm-bob`, `google`, `deepseek`) — the post-login model refresh calls the pi.dev remote-catalog API with **no timeout**. When pi.dev's `/api/models/providers/*` is unresponsive, the login hangs for undici's default ~300s, and Ctrl-C/Escape cannot cancel it (no abort signal is wired into the post-login refresh). `PI_OFFLINE=1` avoids the call entirely and the login returns instantly.
 
 ## Environment
 
@@ -11,15 +11,16 @@ After a successful `/login` (observed with `ibm-bob`, but provider-agnostic), th
 
 ## Steps to reproduce
 
-1. Have any built-in provider credentialed (e.g. `deepseek`, or `github-copilot`) whose cached remote catalog is older than the 4h freshness window (`REMOTE_CATALOG_REFRESH_INTERVAL_MS`).
-2. Run `/login <any-oauth-provider>` and complete SSO.
-3. Post-login, pi calls `https://pi.dev/api/models/providers/<providerId>` and blocks on it with no timeout.
+1. Have any built-in provider credentialed (e.g. `google`, `deepseek`, or `github-copilot`) whose cached remote catalog is older than the 4h freshness window (`REMOTE_CATALOG_REFRESH_INTERVAL_MS`).
+2. Run `/login <any-provider>` and complete auth. The login provider itself is irrelevant — the same freeze occurs for OAuth logins (`ibm-bob`) and API-key logins (`google`).
+3. Post-login, pi calls `https://pi.dev/api/models/providers/<credentialedBuiltinId>` and blocks on it with no timeout.
 
 ## Evidence
 
 - `curl https://pi.dev/api/models/providers/deepseek` → **no response within 30s** (HTTP 000), on IPv4 and IPv6, HTTP/1.1 and HTTP/2.
 - `curl https://pi.dev/` (root) → HTTP 200 in ~77ms — the host is reachable; only the API path is unresponsive (server accepts TLS then goes silent). Last successful catalog refresh was written to `models-store.json` the previous day; the endpoint hung ~20h later, i.e. a pi.dev server-side regression, not a client/network issue.
-- Debug log during the freeze: pi-bob's own flow completes in ~21s (token exchange + model discovery), then the login stalls with no further progress until ~300s later.
+- Reproduced after `/login` for `ibm-bob`, `google`, and `deepseek` — the freeze is independent of which provider is being logged in; it occurs whenever *any* credentialed built-in provider's catalog is stale. With several credentialed built-ins (`ibm-bob`, `google`, `deepseek`), multiple such fetches run in parallel post-login.
+- Debug log during the freeze: the logged-in extension's own flow completes in ~21s (token exchange + model discovery), then the login stalls with no further progress until ~300s later.
 - `ps` shows the process idle (0% CPU) while blocked on the fetch; the frozen state is indistinguishable from a deadlock to the user.
 
 ## Root cause
