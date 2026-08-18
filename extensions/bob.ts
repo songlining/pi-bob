@@ -282,6 +282,10 @@ function buildOpenAiCompat(api: CompatibleApi): Record<string, unknown> | undefi
 		supportsReasoningEffort: envBool("IBM_BOB_SUPPORTS_REASONING_EFFORT", false),
 		supportsUsageInStreaming: envBool("IBM_BOB_SUPPORTS_USAGE_IN_STREAMING", true),
 		supportsStrictMode: envBool("IBM_BOB_SUPPORTS_STRICT_MODE", false),
+		// pi-ai auto-detect defaults these to true for unknown endpoints; Bob's
+		// strict validator rejects `store` and `prompt_cache_key` with a bare 422.
+		supportsStore: false,
+		supportsLongCacheRetention: false,
 	};
 
 	const maxTokensField = env("IBM_BOB_MAX_TOKENS_FIELD") as MaxTokensField | undefined;

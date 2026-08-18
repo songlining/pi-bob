@@ -141,6 +141,7 @@ export IBM_BOB_MAX_TOKENS_FIELD=max_tokens
 ```
 
 Bob's OpenAI-compatible route currently rejects `tools[].function.strict`, so `IBM_BOB_SUPPORTS_STRICT_MODE=false` is the default.
+It also rejects OpenAI-specific `store` and `prompt_cache_key` request properties with a bare `422`, so both are always disabled for the OpenAI adapters.
 
 ## Validation performed
 
