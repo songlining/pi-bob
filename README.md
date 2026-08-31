@@ -4,9 +4,21 @@ Pi provider package for IBM Bob / IBM-approved enterprise model endpoints.
 
 The package registers Bob through Pi's built-in compatible provider APIs and discovers the currently exposed model catalog from Bob's authenticated `/inference/v1/model/info` endpoint. It does not scrape Bob, extract browser/session credentials, or bypass IBM-approved access paths.
 
+> **✅ Works with IBM Bob Shell / Bob CLI 2.x (verified against `bobshell@2.0.1`, 2026-08-31).**
+> SSO login, token refresh, and live model discovery all work against Bob 2.0 — 13 models discovered, including `premium`, `premium-ide`, `ultra`, `fast`, and `wxO-model` (1M ctx). One caveat: under 2.x, Bob only accepts the default **`openai-completions`** adapter; `anthropic-messages` and `openai-responses` are rejected with 403 by Bob-side entitlement. 1.x Bob Shell installations keep working — the parser accepts both payload shapes. See [Discovered local Bob Shell settings](#discovered-local-bob-shell-settings) for the full 2.x change list.
+
 ## Discovered local Bob Shell settings
 
-From the installed `bobshell@1.0.6` package and the local redacted Bob configuration:
+Updated for the installed `bobshell@2.0.1` package (upgraded from 1.0.6; findings verified against the live endpoint on 2026-08-31):
+
+- Bob Shell 2.x moved stored SSO tokens to `~/.bob/settings/auth-secrets.json` (key `bob.auth.tokens-<gateway>`); `~/.bob/settings.json` keeps only non-secret settings. This extension still reads only `ibm.instanceId`/`ibm.teamId` from there and still ignores Bob's secrets.
+- Token endpoints are unchanged in practice: 2.x builds `${gateway}/authn` + `v1/auth/token|refresh`, which resolves to the same `/authn/v1/auth/token` and `/authn/v1/auth/refresh` routes used here. The web login URL is now assembled as `https://bob.ibm.com` + `/login`; the final URL is the same as the 1.x constant.
+- **Breaking:** 2.x `model/info` entries dropped `litellm_params` (the backend identifier) and now carry `max_output_tokens` and `supports_prompt_caching` alongside `max_tokens`. The parser accepts both shapes and falls back to the route name when the backend is missing.
+- **Breaking:** 2.x `model/info` requires `x-instance-id` (HTTP 400 without it); `x-team-id` stays optional. The extension already sends both from Bob settings or the JWT `instances` claim.
+- Model tiers were renamed: 1.x `premium`/`pro`/`flash`/`flash-lite` became 2.x tiers `fast`/`premium`/`ultra` (`explorer` exists but is hidden). Live catalog also exposes `premium-ide`, `premium-shell`, `sonnet-4.5`, `wxO-model` (1M ctx / 64k out), `gpt-oss-20b`, and granite/rnj code models. The `premium` alias still exists, so the fallback catalog stays valid.
+- **Breaking (entitlement):** under 2.0, the `anthropic-messages` and `openai-responses` routes return `403 Access denied` with a valid token (routes exist; access is denied for this instance). Only the default `openai-completions` adapter works; treat the alternates as unavailable until IBM grants access.
+
+From the installed `bobshell@1.0.6` package and the local redacted Bob configuration (historical):
 
 - Bob Shell CLI: `bob`
 - Bob Shell package: `bobshell`
@@ -35,6 +47,8 @@ Set `IBM_BOB_API` to one of Pi's compatible API adapters:
 - `openai-completions` — default; OpenAI Chat Completions-compatible routes.
 - `openai-responses` — OpenAI Responses-compatible routes.
 - `anthropic-messages` — Anthropic Messages-compatible routes.
+
+Under Bob Shell 2.x, Bob currently accepts only the default `openai-completions` adapter; the other two return `403 Access denied` regardless of extension settings (verified 2026-08-31).
 
 The extension registers provider id `ibm-bob`. It uses an isolated `ibm-bob-compatible` Pi API adapter internally, then delegates serialization and streaming to the selected built-in adapter. This prevents Bob-specific authentication rules from affecting other providers.
 
@@ -109,7 +123,7 @@ For SSO, do **not** copy a token out of Bob's local credential store unless IBM 
 | `IBM_BOB_READ_BOBSHELL_SETTINGS` | `true` | Read non-secret `instanceId`/`teamId` from `~/.bob/settings.json`. |
 | `IBM_BOB_INSTANCE_ID` | Bob setting | Override `x-instance-id`. |
 | `IBM_BOB_TEAM_ID` | Bob setting | Override `x-team-id`. |
-| `IBM_BOB_USER_AGENT` | `pi-bob/0.2.0` | User-Agent header sent to Bob endpoint. |
+| `IBM_BOB_USER_AGENT` | `pi-bob/0.2.2` | User-Agent header sent to Bob endpoint. |
 
 ### Auth headers
 
@@ -145,18 +159,20 @@ It also rejects OpenAI-specific `store` and `prompt_cache_key` request propertie
 
 ## Validation performed
 
-Bob Shell SSO itself works locally:
+### Verified against Bob Shell 2.0.1 (2026-08-31)
 
-```bash
-bob --auth-method sso -m premium -p 'Reply with exactly: bob-ok' --hide-intermediary-output --output-format json
-```
+- Live discovery through Pi: `pi --list-models` shows all 13 catalog models (`premium`, `premium-ide`, `premium-shell`, `ultra`, `fast`, `explorer`, `sonnet-4.5`, `wxO-model`, `gpt-oss-20b`, granite/rnj) from any directory, using stored SSO credentials.
+- End-to-end inference through `openai-completions`: `premium`, `ultra`, and `premium-shell` all responded correctly to exact-reply smokes.
+- SSO refresh on `/authn/v1/auth/refresh` returned `200` with a rotated refresh token; the refreshed token immediately passed `model/info`.
+- `anthropic-messages` and `openai-responses` routes: `403 Access denied` with a valid token — Bob-side entitlement change, not an extension defect.
+- `bun test`: 33 tests pass, including a fixture built from an observed 2.x `model/info` payload (no `litellm_params`, `max_output_tokens`, `supports_prompt_caching`).
 
-The response included `bob-ok` and successful usage stats for model `premium`.
+### Earlier validation (Bob Shell 1.x era)
 
 The unauthenticated Bob model-info endpoint responds as expected when called with a normal User-Agent:
 
 ```bash
-curl -H 'User-Agent: pi-bob/0.1.0' \
+curl -H 'User-Agent: pi-bob/0.2.2' \
   https://api.us-east.bob.ibm.com/inference/v1/model/info
 ```
 
@@ -208,6 +224,8 @@ blocks with no timeout for roughly 5 minutes, and Ctrl-C cannot cancel it.
 Run Pi with `PI_OFFLINE=1` to skip Pi's network catalog refresh entirely; the
 login then returns to the prompt immediately after SSO, and ibm-bob's own
 model discovery still runs.
+
+**`/model` shows only `premium` under `ibm-bob`.** The stored credentials carry no cached model catalog — typical for credentials created before this version, or after Bob changes its catalog shape. Run `/login ibm-bob` once: login always rediscovers the catalog and re-attaches it to the stored credentials, and every later startup reuses it. Do **not** hand-edit `~/.pi/agent/auth.json` to add the catalog; Pi's auth store manages that file and may silently drop hand-written fields.
 
 **Debugging the login flow.** Run with `IBM_BOB_DEBUG=1` and stderr
 redirected to a file to see per-step timing for the SSO callback, token

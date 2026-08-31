@@ -239,7 +239,7 @@ function parseJsonHeaders(): Record<string, string> | undefined {
 
 function buildHeaders(settings?: BobShellSettings): Record<string, string> | undefined {
 	const headers: Record<string, string> = {
-		"User-Agent": env("IBM_BOB_USER_AGENT") ?? "pi-bob/0.2.0",
+		"User-Agent": env("IBM_BOB_USER_AGENT") ?? "pi-bob/0.2.2",
 	};
 
 	const instanceId = env("IBM_BOB_INSTANCE_ID") ?? settings?.ibm?.instanceId;
@@ -342,10 +342,12 @@ export function parseBobModelCatalog(payload: unknown): BobDiscoveredModel[] {
 	const seen = new Set<string>();
 	let structurallyValidEntries = 0;
 	for (const entry of payload.data) {
-		if (!isRecord(entry) || !isRecord(entry.model_info) || !isRecord(entry.litellm_params)) continue;
+		if (!isRecord(entry) || !isRecord(entry.model_info)) continue;
 		const id = safeCatalogLabel(entry.model_name);
-		const backend = safeCatalogLabel(entry.litellm_params.model);
-		if (!id || !backend) continue;
+		if (!id) continue;
+		// bobshell 2.x model/info entries dropped litellm_params; fall back to the
+		// route name itself so discovery still works against 2.x payloads.
+		const backend = safeCatalogLabel((entry.litellm_params as Record<string, unknown> | undefined)?.model) || id;
 		const exposed = entry.model_info.exposed;
 		if (exposed !== undefined && typeof exposed !== "boolean") continue;
 		structurallyValidEntries++;
@@ -363,7 +365,10 @@ export function parseBobModelCatalog(payload: unknown): BobDiscoveredModel[] {
 				entry.model_info.supports_thinking === true,
 			supportsVision: entry.model_info.supports_vision === true,
 			contextWindow: positiveNumber(entry.model_info.max_input_tokens),
-			maxTokens: positiveNumber(entry.model_info.max_tokens),
+			// bobshell 2.x adds max_output_tokens; keep the conservative 1.x
+			// max_tokens precedence and only use it as a fallback.
+			maxTokens:
+				positiveNumber(entry.model_info.max_tokens) ?? positiveNumber(entry.model_info.max_output_tokens),
 			cost: {
 				input: perMillionCost(entry.model_info.input_cost_per_token),
 				output: perMillionCost(entry.model_info.output_cost_per_token),
@@ -508,7 +513,7 @@ async function fetchBobModelCatalog(
 	const headers: Record<string, string> = {
 		Accept: "application/json",
 		Authorization: `${authScheme} ${accessToken}`,
-		"User-Agent": env("IBM_BOB_USER_AGENT") ?? "pi-bob/0.2.0",
+		"User-Agent": env("IBM_BOB_USER_AGENT") ?? "pi-bob/0.2.2",
 	};
 	const instanceId =
 		env("IBM_BOB_INSTANCE_ID") ?? settings?.ibm?.instanceId ?? readInstanceFromJwt(accessToken);
@@ -777,7 +782,7 @@ async function postToken(path: "/authn/v1/auth/token" | "/authn/v1/auth/refresh"
 	try {
 		const response = await fetch(`${bobOrigin()}${path}`, {
 			method: "POST",
-			headers: { "Content-Type": "application/json", "User-Agent": env("IBM_BOB_USER_AGENT") ?? "pi-bob/0.2.0" },
+			headers: { "Content-Type": "application/json", "User-Agent": env("IBM_BOB_USER_AGENT") ?? "pi-bob/0.2.2" },
 			body: JSON.stringify(body),
 			signal: controller.signal,
 		});

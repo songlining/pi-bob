@@ -95,6 +95,31 @@ function modelInfoPayload() {
 	};
 }
 
+function bob2ModelInfoPayload() {
+	// Observed bobshell 2.0.1 payload: no litellm_params, adds max_output_tokens
+	// and supports_prompt_caching.
+	return {
+		data: [
+			{
+				model_name: "premium",
+				model_info: {
+					id: "4c6a576bda1095bb14c76f02c3661a9bd9429a9889d09f43fd41e3671a094668",
+					max_tokens: 12_000,
+					max_input_tokens: 200_000,
+					max_output_tokens: 64_000,
+					input_cost_per_token: 0,
+					output_cost_per_token: 0,
+					cache_creation_input_token_cost: 0,
+					cache_read_input_token_cost: 0,
+					supports_vision: true,
+					supports_prompt_caching: true,
+					completion_only: false,
+				},
+			},
+		],
+	};
+}
+
 async function availablePort(): Promise<number> {
 	return new Promise((resolve, reject) => {
 		const server = createNetServer();
@@ -142,6 +167,20 @@ describe("Bob model catalog", () => {
 			contextWindow: 270_000,
 			maxTokens: 64_000,
 			cost: { input: 2.7, output: 13.5, cacheRead: 0.3, cacheWrite: 3.75 },
+		});
+	});
+
+	test("parses bobshell 2.x entries without litellm_params", () => {
+		const models = parseBobModelCatalog(bob2ModelInfoPayload());
+		expect(models).toHaveLength(1);
+		expect(models[0]).toEqual({
+			id: "premium",
+			backend: "premium",
+			reasoning: false,
+			supportsVision: true,
+			contextWindow: 200_000,
+			maxTokens: 12_000,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 		});
 	});
 
