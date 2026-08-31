@@ -63,6 +63,16 @@ Model discovery is enabled by default:
 
 Discovered context limits, output limits, vision support, reasoning support, backend identifiers, and token prices are mapped into Pi model definitions. Bob reports prices per token; Pi displays prices per million tokens, so the extension performs that conversion.
 
+### How context/output limits are determined
+
+Every advertised number comes from Bob's own `/model/info` catalog — the extension never hardcodes per-model values:
+
+- **Context window** ← `model_info.max_input_tokens`.
+- **Max output tokens** ← `model_info.max_output_tokens` when present (2.x), else `model_info.max_tokens` (the 1.x output cap).
+- Models that report no limits (e.g. `granite-8b-code-instruct`, `rnj-1-*`) use the defaults: 200,000 context / 8,192 output, overridable via `IBM_BOB_CONTEXT_WINDOW` / `IBM_BOB_MAX_TOKENS`.
+
+The 2.x precedence was determined empirically, not from documentation. The 2.x catalog reports *two* output fields for the same route (e.g. `premium`: `max_tokens: 12000`, `max_output_tokens: 64000`), so on 2026-08-31 the extension author probed the live endpoint: a `chat/completions` request for `premium` with `max_tokens=50000` — four times the catalog's `max_tokens` — returned HTTP `200` and completed normally. That proves `max_tokens` is no longer the enforced cap and `max_output_tokens` is the real limit, so the larger, newer field is advertised when present. 1.x payloads have no `max_output_tokens`, where `max_tokens` was verified to be the output cap, keeping that behavior unchanged.
+
 ## Quick start for the discovered Bob endpoint
 
 Use Bob SSO through Pi:
