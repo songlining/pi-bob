@@ -164,8 +164,13 @@ function configuredApiKey(): { envName: "IBM_BOB_API_KEY" | "IBM_BOB_KEY"; value
 	return alias ? { envName: "IBM_BOB_KEY", value: alias } : undefined;
 }
 
-function providerApiKeyReference(): string {
-	return `$${configuredApiKey()?.envName ?? "IBM_BOB_API_KEY"}`;
+function providerApiKeyReference(): string | undefined {
+	const apiKey = configuredApiKey();
+	// Only advertise when resolvable at launch: an unresolvable $VAR reference makes
+	// pi's /model catalog refresh throw for a logged-out provider ("Could not refresh
+	// ibm-bob; showing cached models"). Process env is fixed after launch, so this
+	// loses nothing.
+	return apiKey ? `$${apiKey.envName}` : undefined;
 }
 
 function apiKeyAuthScheme(): string {
@@ -921,6 +926,7 @@ export default async function (pi: ExtensionAPI) {
 	const headers = buildHeaders(settings);
 	let catalog: BobDiscoveredModel[] | undefined;
 	const apiKey = configuredApiKey();
+	const apiKeyRef = providerApiKeyReference();
 	if (apiKey && envBool("IBM_BOB_DISCOVER_MODELS", true)) {
 		try {
 			catalog = await fetchBobModelCatalog(apiKey.value, apiKeyAuthScheme(), settings);
@@ -934,7 +940,7 @@ export default async function (pi: ExtensionAPI) {
 	pi.registerProvider(PROVIDER_ID, {
 		name: "IBM Bob",
 		baseUrl: providerRequestBaseUrl(api),
-		apiKey: providerApiKeyReference(),
+		...(apiKeyRef ? { apiKey: apiKeyRef } : {}),
 		api: BOB_API,
 		...(headers ? { headers } : {}),
 		models: buildModels(api, catalog),
