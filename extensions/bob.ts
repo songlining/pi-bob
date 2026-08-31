@@ -365,10 +365,12 @@ export function parseBobModelCatalog(payload: unknown): BobDiscoveredModel[] {
 				entry.model_info.supports_thinking === true,
 			supportsVision: entry.model_info.supports_vision === true,
 			contextWindow: positiveNumber(entry.model_info.max_input_tokens),
-			// bobshell 2.x adds max_output_tokens; keep the conservative 1.x
-			// max_tokens precedence and only use it as a fallback.
+			// bobshell 2.x: max_tokens is no longer the enforced output cap
+			// (verified 2026-08-31: premium accepts max_tokens=50000; its
+			// max_output_tokens=64000 is the real limit). 1.x payloads have no
+			// max_output_tokens and keep the old max_tokens behavior.
 			maxTokens:
-				positiveNumber(entry.model_info.max_tokens) ?? positiveNumber(entry.model_info.max_output_tokens),
+				positiveNumber(entry.model_info.max_output_tokens) ?? positiveNumber(entry.model_info.max_tokens),
 			cost: {
 				input: perMillionCost(entry.model_info.input_cost_per_token),
 				output: perMillionCost(entry.model_info.output_cost_per_token),

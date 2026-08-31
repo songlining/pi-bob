@@ -179,7 +179,7 @@ describe("Bob model catalog", () => {
 			reasoning: false,
 			supportsVision: true,
 			contextWindow: 200_000,
-			maxTokens: 12_000,
+			maxTokens: 64_000,
 			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 		});
 	});
