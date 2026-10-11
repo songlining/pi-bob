@@ -15,9 +15,9 @@ Bob backend) with an HMAC-SHA256 signature. It adds two headers:
 | `x-request-signature` | HMAC-SHA256 hex digest of the signing string     |
 
 `pi-bob` sends requests to the same endpoints without these headers. As of
-2026-08-31 the server does not enforce the signature — all pi-bob traffic is
-unsigned and accepted. IBM could start enforcing it at any time, which would
-break `pi-bob`.
+2026-10-11 (`bobshell@2.0.6`) the server still does not enforce the signature —
+all pi-bob traffic is unsigned and accepted. IBM could start enforcing it at any
+time, which would break `pi-bob`.
 
 ## The signing algorithm
 
@@ -75,13 +75,14 @@ timestamp, HMAC-SHA256 hex digest.
 `isAuthnBackend()` routed to `/inference/v1/...` for SSO/JWT tokens (the path
 pi-bob's `/login ibm-bob` uses) and skipped signing for `sk-`/`pk` API keys.
 
-### bobshell 2.0.1 (verified 2026-08-31)
+### bobshell 2.x (2.0.1 verified 2026-08-31; 2.0.6 re-checked 2026-10-11)
 
 All of the above gates are gone: `shouldSignUrl`, `CUSTOM_BASE_URL`, the
 private-preview gate, and `isAuthnBackend` no longer appear in the bundle. The
 only remaining gate is `if (this.config.secretKey)` inside the GatewayClient
-request path — and **nothing in the 2.0.1 bundle ever assigns `secretKey`**.
-Signing is intact infrastructure but dormant dead code in this build: no
+request path — and **nothing ever assigns `secretKey`**. Confirmed still true in
+the 2.0.6 bundle (`RUN_TIME_HMAC_SECRET`/`BUILD_TIME_HMAC_SECRET`: zero hits).
+Signing is intact infrastructure but dormant dead code in these builds: no
 secret source, so no request is signed.
 
 ## The secret key
@@ -94,11 +95,12 @@ secret source, so no request is signed.
    from the bundle's own bytes: `SHA256(contentBefore + contentAfter)`. This
    tied the secret to the exact official bundle (anti-tampering).
 
-### 2.0.1 status
+### 2.x status
 
-`RUN_TIME_HMAC_SECRET` and `BUILD_TIME_HMAC_SECRET` are gone (zero hits), as is
-the UUID-marked encrypted block. No replacement secret source exists in the
-bundle. If IBM re-enables signing, the provisioning mechanism will be new.
+`RUN_TIME_HMAC_SECRET` and `BUILD_TIME_HMAC_SECRET` are gone (zero hits in both
+2.0.1 and 2.0.6), as is the UUID-marked encrypted block. No replacement secret
+source exists in the bundle. If IBM re-enables signing, the provisioning
+mechanism will be new.
 
 ## Prior art: `thelonelyghost/pi-dangit-bobby`
 
@@ -132,12 +134,14 @@ the current adapter-entitlement findings.
 One deliberate divergence: the fork sends a `bobshell/<version>` User-Agent
 (impersonating the official CLI). pi-bob sends an honest `pi-bob/<version>` and
 has never been blocked on that basis — the real server-side gates so far are
-`x-instance-id` (required under 2.x) and route entitlements (403). Keep the
-honest UA; impersonation is the posture that gets third-party clients flagged.
+`x-instance-id` (required under 2.x), `x-team-id` (required for inference), and
+route entitlements (403). Keep the honest UA; impersonation is the posture that
+gets third-party clients flagged.
 
-## Current status (2026-08-31, bobshell 2.0.1)
+## Current status (2026-10-11, bobshell 2.0.6)
 
-- `pi-bob` requests to Bob endpoints succeed **without** signature headers.
+- `pi-bob` requests to Bob endpoints succeed **without** signature headers
+  (re-verified on 2.0.6 against `/inference/v1/chat/completions`).
 - The signature implementation survives in the client but is **dormant**: no
   secret is provisioned, nothing signs.
 - The server *does* enforce other things under 2.x (`x-instance-id` required,

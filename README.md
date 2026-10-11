@@ -4,18 +4,19 @@ Pi provider package for IBM Bob / IBM-approved enterprise model endpoints.
 
 The package registers Bob through Pi's built-in compatible provider APIs and discovers the currently exposed model catalog from Bob's authenticated `/inference/v1/model/info` endpoint. It does not scrape Bob, extract browser/session credentials, or bypass IBM-approved access paths.
 
-> **✅ Works with IBM Bob Shell / Bob CLI 2.x (verified against `bobshell@2.0.1`, 2026-08-31).**
-> SSO login, token refresh, and live model discovery all work against Bob 2.0 — 13 models discovered, including `premium`, `premium-ide`, `ultra`, `fast`, and `wxO-model` (1M ctx). One caveat: under 2.x, Bob only accepts the default **`openai-completions`** adapter; `anthropic-messages` and `openai-responses` are rejected with 403 by Bob-side entitlement. 1.x Bob Shell installations keep working — the parser accepts both payload shapes. See [Discovered local Bob Shell settings](#discovered-local-bob-shell-settings) for the full 2.x change list.
+> **✅ Works with IBM Bob Shell / Bob CLI 2.x (verified against `bobshell@2.0.6`, 2026-10-11).**
+> Routing headers, `model/info` payload shape, live discovery, and end-to-end inference were all re-checked on 2.0.6: the catalog now exposes 10 models — `premium`, `premium-ide`, `premium-shell`, `fast`, `explorer`, `wxO-model` (1M ctx), `background`, `security`, `gpt-oss-20b`, and `openai/gpt-oss-20b`. SSO login and token refresh were last exercised on 2.0.1; see [Validation performed](#validation-performed). One caveat: under 2.x, Bob only accepts the default **`openai-completions`** adapter; `anthropic-messages` and `openai-responses` are rejected with 403 by Bob-side entitlement. 1.x Bob Shell installations keep working — the parser accepts both payload shapes. See [Discovered local Bob Shell settings](#discovered-local-bob-shell-settings) for the full 2.x change list.
 
 ## Discovered local Bob Shell settings
 
-Updated for the installed `bobshell@2.0.1` package (upgraded from 1.0.6; findings verified against the live endpoint on 2026-08-31):
+First characterised on the installed `bobshell@2.0.1` package (upgraded from 1.0.6) and re-verified on `bobshell@2.0.6` against the live endpoint on 2026-10-11:
 
 - Bob Shell 2.x moved stored SSO tokens to `~/.bob/settings/auth-secrets.json` (key `bob.auth.tokens-<gateway>`); `~/.bob/settings.json` keeps only non-secret settings. This extension still reads only `ibm.instanceId`/`ibm.teamId` from there and still ignores Bob's secrets.
 - Token endpoints are unchanged in practice: 2.x builds `${gateway}/authn` + `v1/auth/token|refresh`, which resolves to the same `/authn/v1/auth/token` and `/authn/v1/auth/refresh` routes used here. The web login URL is now assembled as `https://bob.ibm.com` + `/login`; the final URL is the same as the 1.x constant.
-- **Breaking:** 2.x `model/info` entries dropped `litellm_params` (the backend identifier) and now carry `max_output_tokens` and `supports_prompt_caching` alongside `max_tokens`. The parser accepts both shapes and falls back to the route name when the backend is missing. `max_output_tokens` is the enforced output cap under 2.x (verified 2026-08-31: `premium` accepted `max_tokens=50000` despite a catalog `max_tokens` of 12000) and is advertised when present.
-- **Breaking:** 2.x `model/info` requires `x-instance-id` (HTTP 400 without it); `x-team-id` stays optional. The extension already sends both from Bob settings or the JWT `instances` claim.
-- Model tiers were renamed: 1.x `premium`/`pro`/`flash`/`flash-lite` became 2.x tiers `fast`/`premium`/`ultra` (`explorer` exists but is hidden). Live catalog also exposes `premium-ide`, `premium-shell`, `sonnet-4.5`, `wxO-model` (1M ctx / 64k out), `gpt-oss-20b`, and granite/rnj code models. The `premium` alias still exists, so the fallback catalog stays valid.
+- **Payload shape:** 2.x `model/info` entries carry `max_output_tokens` and `supports_prompt_caching` alongside `max_tokens`; `litellm_params` (the backend identifier) was absent in 2.0.1 and is present again in 2.0.6. The parser accepts both shapes and falls back to the route name when the backend is missing. `max_output_tokens` is the enforced output cap under 2.x (verified 2026-08-31: `premium` accepted `max_tokens=50000` despite a catalog `max_tokens` of 12000) and is advertised when present.
+- 2.x requires the `x-instance-id` header (HTTP 400 `X-Instance-ID header is required` without it). `x-team-id` is optional for `model/info` (HTTP 200 without it) but **required for inference** — a `chat/completions` request without it returns HTTP 402 `team user not found or has been deleted` (verified 2026-10-11). The extension always sends both, from Bob settings or the JWT `instances` claim.
+- Model tiers were renamed: 1.x `premium`/`pro`/`flash`/`flash-lite` became 2.x tiers `fast`/`premium`/`ultra`. The 2.0.6 catalog is `premium`, `premium-ide`/`premium-shell` (270K ctx), `fast`, `explorer`, `wxO-model` (1M ctx / 64K out), and the utility routes `background`, `security`, `gpt-oss-20b`, `openai/gpt-oss-20b` (131,072 ctx) — all with `supports_vision` except the utility routes. The catalog changes server-side without a CLI release: `ultra`, `sonnet-4.5`, and the granite/rnj code models were exposed in 2.0.1 and are gone in 2.0.6, and `explorer` became visible. The `premium` alias exists in both, so the fallback catalog stays valid.
+- No route in the 2.0.6 catalog publishes `supports_reasoning`, `supports_reasoning_effort`, or `supports_thinking`, so every Bob model is advertised as non-reasoning. `premium` does return `reasoning_content` when asked for `reasoning_effort`, so reasoning is opt-in via `IBM_BOB_REASONING_MODELS=premium` (with `IBM_BOB_SUPPORTS_REASONING_EFFORT=true`).
 - **Breaking (entitlement):** under 2.0, the `anthropic-messages` and `openai-responses` routes return `403 Access denied` with a valid token (routes exist; access is denied for this instance). Only the default `openai-completions` adapter works; treat the alternates as unavailable until IBM grants access.
 
 From the installed `bobshell@1.0.6` package and the local redacted Bob configuration (historical):
@@ -48,7 +49,7 @@ Set `IBM_BOB_API` to one of Pi's compatible API adapters:
 - `openai-responses` — OpenAI Responses-compatible routes.
 - `anthropic-messages` — Anthropic Messages-compatible routes.
 
-Under Bob Shell 2.x, Bob currently accepts only the default `openai-completions` adapter; the other two return `403 Access denied` regardless of extension settings (verified 2026-08-31).
+Under Bob Shell 2.x, Bob currently accepts only the default `openai-completions` adapter; the other two return `403 Access denied` regardless of extension settings (re-verified 2026-10-11).
 
 The extension registers provider id `ibm-bob`. It uses an isolated `ibm-bob-compatible` Pi API adapter internally, then delegates serialization and streaming to the selected built-in adapter. This prevents Bob-specific authentication rules from affecting other providers.
 
@@ -69,7 +70,7 @@ Every advertised number comes from Bob's own `/model/info` catalog — the exten
 
 - **Context window** ← `model_info.max_input_tokens`.
 - **Max output tokens** ← `model_info.max_output_tokens` when present (2.x), else `model_info.max_tokens` (the 1.x output cap).
-- Models that report no limits (e.g. `granite-8b-code-instruct`, `rnj-1-*`) use the defaults: 200,000 context / 8,192 output, overridable via `IBM_BOB_CONTEXT_WINDOW` / `IBM_BOB_MAX_TOKENS`.
+- Models that report no limits (e.g. the 1.x `granite-8b-code-instruct` and `rnj-1-*` routes) use the defaults: 200,000 context / 8,192 output, overridable via `IBM_BOB_CONTEXT_WINDOW` / `IBM_BOB_MAX_TOKENS`.
 
 The 2.x precedence was determined empirically, not from documentation. The 2.x catalog reports *two* output fields for the same route (e.g. `premium`: `max_tokens: 12000`, `max_output_tokens: 64000`), so on 2026-08-31 the extension author probed the live endpoint: a `chat/completions` request for `premium` with `max_tokens=50000` — four times the catalog's `max_tokens` — returned HTTP `200` and completed normally. That proves `max_tokens` is no longer the enforced cap and `max_output_tokens` is the real limit, so the larger, newer field is advertised when present. 1.x payloads have no `max_output_tokens`, where `max_tokens` was verified to be the output cap, keeping that behavior unchanged.
 
@@ -169,9 +170,18 @@ It also rejects OpenAI-specific `store` and `prompt_cache_key` request propertie
 
 ## Validation performed
 
+### Verified against Bob Shell 2.0.6 (2026-10-11)
+
+- Live discovery through Pi: `pi -e . --list-models` shows all 10 current catalog models (`premium`, `premium-ide`, `premium-shell`, `fast`, `explorer`, `wxO-model`, `background`, `security`, `gpt-oss-20b`, `openai/gpt-oss-20b`) from any directory, using stored SSO credentials.
+- End-to-end inference through `openai-completions`: `pi -e . --model ibm-bob/premium -p 'Reply with exactly: pi-bob-ok'` returned `pi-bob-ok`, and `--model ibm-bob/openai/gpt-oss-20b` returned `slash-id-ok`, so two-segment model IDs flow through selection and inference. A raw `POST /inference/v1/chat/completions` for `premium` returned `200` without the signing headers, so request signing is still unenforced.
+- `anthropic-messages` and `openai-responses` routes: `403 Access denied` with a valid token — Bob-side entitlement, not an extension defect.
+- `bun test`: 33 tests pass.
+- When probing by hand, set `User-Agent: pi-bob/0.2.2` (what the extension sends). Requests from `curl`/`python-urllib` default UAs are rejected by Cloudflare in front of Bob with a `403` HTML page, which looks like an entitlement failure but is not.
+- Not re-verified on 2.0.6: SSO token refresh (last confirmed on 2.0.1, 2026-08-31).
+
 ### Verified against Bob Shell 2.0.1 (2026-08-31)
 
-- Live discovery through Pi: `pi --list-models` shows all 13 catalog models (`premium`, `premium-ide`, `premium-shell`, `ultra`, `fast`, `explorer`, `sonnet-4.5`, `wxO-model`, `gpt-oss-20b`, granite/rnj) from any directory, using stored SSO credentials.
+- Live discovery through Pi: `pi --list-models` showed all 13 catalog models then exposed (`premium`, `premium-ide`, `premium-shell`, `ultra`, `fast`, `explorer`, `sonnet-4.5`, `wxO-model`, `gpt-oss-20b`, granite/rnj) from any directory, using stored SSO credentials.
 - End-to-end inference through `openai-completions`: `premium`, `ultra`, and `premium-shell` all responded correctly to exact-reply smokes.
 - SSO refresh on `/authn/v1/auth/refresh` returned `200` with a rotated refresh token; the refreshed token immediately passed `model/info`.
 - `anthropic-messages` and `openai-responses` routes: `403 Access denied` with a valid token — Bob-side entitlement change, not an extension defect.
