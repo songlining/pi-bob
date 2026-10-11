@@ -16,6 +16,7 @@ const ENV_KEYS = [
 	"IBM_BOB_AUTH_SCHEME",
 	"IBM_BOB_BASE_URL",
 	"IBM_BOB_CONTEXT_WINDOW",
+	"IBM_BOB_CREDITS_PER_MILLION",
 	"IBM_BOB_DISCOVER_MODELS",
 	"IBM_BOB_FORCE_ADAPTIVE_THINKING",
 	"IBM_BOB_HEADERS_JSON",
@@ -256,6 +257,77 @@ describe("Bob model catalog", () => {
 	test("uses default fallback models for empty discovered and configured lists", () => {
 		process.env.IBM_BOB_MODELS = ",,,";
 		expect(buildModels("openai-completions", []).map(({ id }) => id)).toEqual(["premium"]);
+	});
+
+	test("prices routes from the Bobcoin rate table when the catalog reports zero", () => {
+		const discovered: BobDiscoveredModel[] = ["premium", "fast", "wxO-model", "unknown-route"].map((id) => ({
+			id,
+			backend: id,
+			reasoning: false,
+			supportsVision: false,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		}));
+		const costs = Object.fromEntries(
+			buildModels("openai-completions", discovered).map((model) => [model.id, model.cost]),
+		);
+		// 2.0 Bobcoins/M at $0.50 each, charged identically in and out and for cache.
+		expect(costs.premium).toEqual({ input: 1, output: 1, cacheRead: 1, cacheWrite: 1 });
+		expect(costs["wxO-model"]).toEqual({ input: 1, output: 1, cacheRead: 1, cacheWrite: 1 });
+		expect(costs.fast?.input).toBeCloseTo(0.4167, 4);
+		expect(costs["unknown-route"]?.input).toBe(1);
+		expect(buildModels("openai-completions", [])[0]?.cost.input).toBe(1);
+	});
+
+	test("keeps catalog prices and lets IBM_BOB_CREDITS_PER_MILLION override the table", () => {
+		const discovered: BobDiscoveredModel[] = [
+			{
+				id: "premium",
+				backend: "premium",
+				reasoning: false,
+				supportsVision: false,
+				cost: { input: 2.7, output: 13.5, cacheRead: 0.3, cacheWrite: 3.75 },
+			},
+			{
+				id: "fast",
+				backend: "fast",
+				reasoning: false,
+				supportsVision: false,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			},
+		];
+		expect(buildModels("openai-completions", discovered)[0]?.cost.output).toBe(13.5);
+		process.env.IBM_BOB_CREDITS_PER_MILLION = "4";
+		expect(buildModels("openai-completions", discovered)[1]?.cost).toEqual({
+			input: 2,
+			output: 2,
+			cacheRead: 2,
+			cacheWrite: 2,
+		});
+	});
+
+	test("fills only the zero buckets when the catalog prices a route partially", () => {
+		const discovered: BobDiscoveredModel[] = [
+			{
+				id: "premium",
+				backend: "premium",
+				reasoning: false,
+				supportsVision: false,
+				cost: { input: 2.7, output: 0, cacheRead: 0, cacheWrite: 3.75 },
+			},
+		];
+		expect(buildModels("openai-completions", discovered)[0]?.cost).toEqual({
+			input: 2.7,
+			output: 1,
+			cacheRead: 1,
+			cacheWrite: 3.75,
+		});
+	});
+
+	test("ignores an unparseable IBM_BOB_CREDITS_PER_MILLION and accepts zero", () => {
+		process.env.IBM_BOB_CREDITS_PER_MILLION = "4abc";
+		expect(buildModels("openai-completions", [])[0]?.cost.input).toBe(1);
+		process.env.IBM_BOB_CREDITS_PER_MILLION = "0";
+		expect(buildModels("openai-completions", [])[0]?.cost.input).toBe(0);
 	});
 
 	test("lets explicit environment metadata override discovered values", () => {

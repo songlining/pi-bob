@@ -87,6 +87,27 @@ const CATALOG_CONTROL_CHARACTER = /[\u0000-\u001f\u007f-\u009f]/;
 const CATALOG_CONTROL_CHARACTERS = /[\u0000-\u001f\u007f-\u009f]/g;
 const SUPPORTED_APIS = new Set<CompatibleApi>(["openai-completions", "openai-responses", "anthropic-messages"]);
 
+// Bob bills a flat Bobcoin rate per route: credits == rate * (prompt + completion)
+// tokens / 1e6, with no discount for cache reads or writes (measured 2026-10-11 on
+// bobshell@2.0.6, exact to 4dp from 254 to 9,780 input tokens). Bobcoins are IBM's
+// consumption meter at $0.50 each, and the catalog reports per-token prices of 0 for
+// every route, so this table is the only price source pi can use.
+// shortcut: IBM can reprice without a CLI release; re-measure if the footer looks wrong.
+const BOBCOIN_USD = 0.5;
+const DEFAULT_CREDITS_PER_MILLION = 2;
+const CREDITS_PER_MILLION: Record<string, number> = {
+	premium: 2,
+	"premium-ide": 2,
+	"premium-shell": 2,
+	"wxO-model": 2,
+	background: 2,
+	security: 2,
+	fast: 5 / 6,
+	explorer: 5 / 6,
+	"gpt-oss-20b": 0,
+	"openai/gpt-oss-20b": 0,
+};
+
 function env(name: string): string | undefined {
 	const value = process.env[name]?.trim();
 	return value ? value : undefined;
@@ -101,6 +122,14 @@ function envOptionalInt(name: string): number | undefined {
 	if (!value) return undefined;
 	const parsed = Number.parseInt(value, 10);
 	return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined;
+}
+
+function envOptionalFloat(name: string): number | undefined {
+	const value = env(name);
+	if (!value) return undefined;
+	// Number() rejects trailing junk that parseFloat would accept ("4abc", "0x10").
+	const parsed = Number(value);
+	return Number.isFinite(parsed) && parsed >= 0 ? parsed : undefined;
 }
 
 function envBool(name: string, fallback: boolean): boolean {
@@ -426,12 +455,31 @@ function cachedCatalog(credentials: OAuthCredentials | undefined): BobDiscovered
 	return sanitizeCachedCatalog((credentials as BobOAuthCredentials | undefined)?.bobModelCatalog);
 }
 
+// Bob's catalog prices every route at 0, so the Bobcoin rate table supplies the cost
+// pi shows. Any bucket IBM does populate wins over the table.
+function bobCost(
+	id: string,
+	catalogCost: BobModelConfig["cost"],
+	creditsOverride: number | undefined,
+): BobModelConfig["cost"] {
+	const credits = creditsOverride ?? CREDITS_PER_MILLION[id] ?? DEFAULT_CREDITS_PER_MILLION;
+	const usdPerMillion = credits * BOBCOIN_USD;
+	// Bob charges cache reads and writes at the same flat rate as fresh input.
+	return {
+		input: catalogCost.input || usdPerMillion,
+		output: catalogCost.output || usdPerMillion,
+		cacheRead: catalogCost.cacheRead || usdPerMillion,
+		cacheWrite: catalogCost.cacheWrite || usdPerMillion,
+	};
+}
+
 export function buildModels(api: CompatibleApi, discovered?: BobDiscoveredModel[]): BobModelConfig[] {
 	const reasoningModels = parseReasoningModels();
 	const reasoningOverride = envOptionalBool("IBM_BOB_REASONING");
 	const inputOverride = env("IBM_BOB_INPUT") ? parseInputTypes() : undefined;
 	const contextOverride = envOptionalInt("IBM_BOB_CONTEXT_WINDOW");
 	const maxTokensOverride = envOptionalInt("IBM_BOB_MAX_TOKENS");
+	const creditsOverride = envOptionalFloat("IBM_BOB_CREDITS_PER_MILLION");
 	const compat = buildOpenAiCompat(api) ?? buildAnthropicCompat(api);
 
 	if (discovered && discovered.length > 0) {
@@ -445,7 +493,7 @@ export function buildModels(api: CompatibleApi, discovered?: BobDiscoveredModel[
 			input: inputOverride ?? (model.supportsVision ? ["text", "image"] : ["text"]),
 			contextWindow: contextOverride ?? model.contextWindow ?? DEFAULT_CONTEXT_WINDOW,
 			maxTokens: maxTokensOverride ?? model.maxTokens ?? DEFAULT_MAX_TOKENS,
-			cost: model.cost,
+			cost: bobCost(model.id, model.cost, creditsOverride),
 			...(compat ? { compat } : {}),
 		}));
 	}
@@ -462,7 +510,7 @@ export function buildModels(api: CompatibleApi, discovered?: BobDiscoveredModel[
 		input,
 		contextWindow,
 		maxTokens,
-		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		cost: bobCost(id, { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, creditsOverride),
 		...(compat ? { compat } : {}),
 	}));
 }

@@ -62,7 +62,7 @@ Model discovery is enabled by default:
 - Entries returned by the authenticated catalog are registered when `model_info.exposed` is omitted or `true`. Routes explicitly marked `exposed: false` are ignored.
 - HTTP failures, timeouts, malformed responses, empty catalogs, and catalogs with no visible models retain the previous SSO catalog or fall back to `IBM_BOB_MODELS`. Bob still enforces route access during inference.
 
-Discovered context limits, output limits, vision support, reasoning support, backend identifiers, and token prices are mapped into Pi model definitions. Bob reports prices per token; Pi displays prices per million tokens, so the extension performs that conversion.
+Discovered context limits, output limits, vision support, reasoning support, and backend identifiers are mapped into Pi model definitions. Pricing is not discovered — Bob reports `0` for every per-token price — so costs come from the [Bobcoin rate table](#bobcoin-billing) instead.
 
 ### How context/output limits are determined
 
@@ -152,8 +152,26 @@ For SSO, do **not** copy a token out of Bob's local credential store unless IBM 
 | `IBM_BOB_INPUT` | discovered; fallback `text` | Override input types with `text` or `text,image`. |
 | `IBM_BOB_REASONING` | discovered; fallback `false` | Explicitly enable or disable reasoning for all models. |
 | `IBM_BOB_REASONING_MODELS` | empty | Comma-separated model IDs to mark as reasoning-capable. |
+| `IBM_BOB_CREDITS_PER_MILLION` | per-route table below | Override the Bobcoin rate for every model, in Bobcoins per million tokens. |
 
-Discovered pricing comes from Bob's model-info response and is converted to Pi's per-million-token units. Fallback models retain zero pricing.
+Pricing comes from the Bobcoin rate table below, because Bob's model-info response reports `0` for every per-token price. If IBM ever populates those fields, the catalog values win and are converted from per-token to Pi's per-million-token units.
+
+### Bobcoin billing
+
+Bob bills a flat **Bobcoin** rate per route. Bobcoins are IBM's consumption meter at **$0.50 each**, drawn from a monthly plan allocation (Free trial 50, Pro 50, Pro+ 180, Ultra 1000) with opt-in pay-as-you-go overage at the same rate.
+
+Measured against the live endpoint on 2026-10-11 (`bobshell@2.0.6`): `credits == rate × (prompt + completion) tokens / 1e6`, exact to four decimals from 254 to 9,780 input tokens, with **input and output priced identically and no discount for cache reads or writes** — a repeated 9,913-token prefix billed the same on the cache-write and cache-hit turns.
+
+| Route | Bobcoins/M | Pi cost (at $0.50) |
+| --- | --- | --- |
+| `premium`, `premium-ide`, `premium-shell`, `wxO-model` | 2.0 | $1.00/M |
+| `background`, `security` | 2.0 | $1.00/M |
+| `fast`, `explorer` | 0.8333 | $0.4167/M |
+| `gpt-oss-20b`, `openai/gpt-oss-20b` | 0 | free |
+
+Any route not in the table is priced at the 2.0 rate. Because the rate is flat, Pi's cost total is exact whichever bucket Pi puts cached tokens in — verified end to end: a 21,941-token `premium` turn reported `$0.021941`, which is 0.043882 Bobcoins at $0.50.
+
+The dollar figure is the **overage rate**, not marginal cost: while you are inside your plan allocation the Bobcoins are already paid for, so treat the footer as a burn gauge rather than a bill. Re-measure if the numbers look off — IBM can reprice without a CLI release.
 
 ### OpenAI compatibility toggles
 
@@ -175,7 +193,7 @@ It also rejects OpenAI-specific `store` and `prompt_cache_key` request propertie
 - Live discovery through Pi: `pi -e . --list-models` shows all 10 current catalog models (`premium`, `premium-ide`, `premium-shell`, `fast`, `explorer`, `wxO-model`, `background`, `security`, `gpt-oss-20b`, `openai/gpt-oss-20b`) from any directory, using stored SSO credentials.
 - End-to-end inference through `openai-completions`: `pi -e . --model ibm-bob/premium -p 'Reply with exactly: pi-bob-ok'` returned `pi-bob-ok`, and `--model ibm-bob/openai/gpt-oss-20b` returned `slash-id-ok`, so two-segment model IDs flow through selection and inference. A raw `POST /inference/v1/chat/completions` for `premium` returned `200` without the signing headers, so request signing is still unenforced.
 - `anthropic-messages` and `openai-responses` routes: `403 Access denied` with a valid token — Bob-side entitlement, not an extension defect.
-- `bun test`: 33 tests pass.
+- `bun test`: 37 tests pass.
 - When probing by hand, set `User-Agent: pi-bob/0.2.2` (what the extension sends). Requests from `curl`/`python-urllib` default UAs are rejected by Cloudflare in front of Bob with a `403` HTML page, which looks like an entitlement failure but is not.
 - Not re-verified on 2.0.6: SSO token refresh (last confirmed on 2.0.1, 2026-08-31).
 
